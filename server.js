@@ -16,15 +16,26 @@ const PORT = Number(process.env.PORT || 3000);
 const DATABASE_URL = cleanEnv(process.env.DATABASE_URL);
 const BOT_TOKEN = cleanEnv(process.env.TELEGRAM_BOT_TOKEN);
 const BOT_USERNAME = cleanEnv(process.env.TELEGRAM_BOT_USERNAME || 'HERTCoinBot').replace(/^@/, '');
-const MINI_APP_SHORT_NAME = cleanEnv(process.env.TELEGRAM_MINI_APP_SHORT_NAME || 'Hert').replace(/^\/+|\/+$/g, '');
+const MINI_APP_SHORT_NAME = cleanEnv(process.env.TELEGRAM_MINI_APP_SHORT_NAME).replace(
+  /^\/+|\/+$/g,
+  ''
+);
 const WEBHOOK_SECRET = cleanEnv(process.env.TELEGRAM_WEBHOOK_SECRET);
-const PUBLIC_WEBAPP_URL = cleanEnv(
+const RAW_PUBLIC_WEBAPP_URL = cleanEnv(
   process.env.PUBLIC_WEBAPP_URL || process.env.WEBAPP_URL || 'https://hert-mining.ai.studio'
 ).replace(/\/+$/, '');
+const PUBLIC_WEBAPP_URL =
+  RAW_PUBLIC_WEBAPP_URL.startsWith('https://') &&
+  !/^https:\/\/ais-(dev|pre)-/i.test(RAW_PUBLIC_WEBAPP_URL) &&
+  !/\.run\.app$/i.test(RAW_PUBLIC_WEBAPP_URL)
+    ? RAW_PUBLIC_WEBAPP_URL
+    : 'https://hert-mining.ai.studio';
 const RENDER_EXTERNAL_URL = cleanEnv(process.env.RENDER_EXTERNAL_URL).replace(/\/+$/, '');
 const CHANNEL_ID = cleanEnv(process.env.HERT_TELEGRAM_CHANNEL_ID || '@hertchannels');
 const CHANNEL_URL = cleanEnv(process.env.HERT_TELEGRAM_CHANNEL_URL || 'https://t.me/hertchannels');
-const BOOST_URL = cleanEnv(process.env.HERT_TELEGRAM_BOOST_URL || 'https://t.me/boost/hertchannels');
+const BOOST_URL = cleanEnv(
+  process.env.HERT_TELEGRAM_BOOST_URL || 'https://t.me/hertchannels?boost'
+).replace(/^https:\/\/t\.me\/boost\/([A-Za-z0-9_]+)\/?$/i, 'https://t.me/$1?boost');
 
 const BASE_RATE_CENTS_PER_HOUR = 3000;
 const REFERRAL_BOOST_PER_FRIEND_CENTS = 300;
@@ -33,8 +44,9 @@ const CYCLE_DURATION_MS = 4 * 60 * 60 * 1000;
 const MIN_HARVEST_SECONDS = 60;
 const BOOST_DURATION_MS = 24 * 60 * 60 * 1000;
 
-const INVITER_JOIN_BONUS_CENTS = 5000; // +50.00 HERT
+const INVITER_JOIN_BONUS_CENTS = 2500; // Exact +25.00 HERT awarded to inviter per genuinely new user
 const FRIEND_WELCOME_BONUS_CENTS = 2500; // +25.00 HERT
+const MANUAL_REFERRAL_NEW_USER_WINDOW_MS = 30 * 60 * 1000; // 30-min fresh registration window
 const REFERRAL_COMMISSION_RATE = 0.1;
 const DAILY_CHECKIN_REWARD_CENTS = 1000; // +10.00 HERT once per calendar day
 const DAILY_REWARDS_CENTS = [1000, 1000, 1000, 1000, 1000, 1000, 1000];
@@ -47,58 +59,61 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILED_ADMIN_ATTEMPTS = 8;
 const failedAdminAttempts = new Map();
 
-const BOOST_CATALOG = [
-  {
-    id: 'overclock_50',
-    name: 'Overclock Core',
-    tagline: '+50% base rate (+15.00 pts/hr) for 24 hours',
-    costCents: 1500,
-    bonusRateCentsPerHour: 1500,
-    boostPercent: 50,
-    durationMs: BOOST_DURATION_MS,
-  },
-  {
-    id: 'conduit_100',
-    name: 'Emerald Conduit',
-    tagline: '+100% base rate (+30.00 pts/hr) for 24 hours',
-    costCents: 5000,
-    bonusRateCentsPerHour: 3000,
-    boostPercent: 100,
-    durationMs: BOOST_DURATION_MS,
-  },
-  {
-    id: 'sovereign_200',
-    name: 'Sovereign Reactor',
-    tagline: '+200% base rate (+60.00 pts/hr) for 24 hours',
-    costCents: 12000,
-    bonusRateCentsPerHour: 6000,
-    boostPercent: 200,
-    durationMs: BOOST_DURATION_MS,
-  },
-];
+const DEFAULT_GAS_RECEIVER_TON_ADDRESS = 'UQBtJdIH5HsQ5_2tqhP9PmAGQEdjTiBtmi7OJbCFtE_BH_P1';
+
+const BOOST_CATALOG = [];
 
 const TASK_CATALOG = [
+  {
+    id: 'join_interlink_labs',
+    title: 'Join Interlink Labs',
+    description:
+      'Join Interlink Labs via the official invite link, then return here to submit your username/ID for verification.',
+    category: 'social',
+    platform: 'partner',
+    verificationMode: 'admin_approval',
+    rewardCents: 3500,
+    actionUrl: 'https://interlinklabs.ai/08067934296',
+    targetTab: null,
+    actionLabel: 'Join Now',
+  },
+  {
+    id: 'join_verychat',
+    title: 'Join Verychat',
+    description:
+      'Join Verychat via the official invite link, then return here to submit your username/handle for verification.',
+    category: 'social',
+    platform: 'partner',
+    verificationMode: 'admin_approval',
+    rewardCents: 3500,
+    actionUrl: 'https://invite.verychat.io/0808abdool',
+    targetTab: null,
+    actionLabel: 'Join Now',
+  },
+  {
+    id: 'join_gram_network',
+    title: 'Join Gram Network',
+    description:
+      'Launch Gram Network on Telegram via the official link, then return here to submit your Telegram/Gram username for verification.',
+    category: 'social',
+    platform: 'partner',
+    verificationMode: 'admin_approval',
+    rewardCents: 3500,
+    actionUrl: 'https://telegram.me/Gramnetwork_bot?startapp=6701186910',
+    targetTab: null,
+    actionLabel: 'Join Now',
+  },
   {
     id: 'join_tg_channel',
     title: 'Join Official HERT Channel (@hertchannels)',
     description: 'Subscribe to @hertchannels on Telegram for verified ecosystem & TGE updates.',
     category: 'social',
     platform: 'telegram',
+    verificationMode: 'telegram_api',
     rewardCents: 3000,
     actionUrl: CHANNEL_URL,
     targetTab: null,
     actionLabel: 'Join Channel',
-  },
-  {
-    id: 'boost_tg_channel',
-    title: 'Boost Official HERT Channel',
-    description: 'Boost @hertchannels on Telegram to unlock community perks and bonus HERT Points.',
-    category: 'social',
-    platform: 'boost',
-    rewardCents: 7500,
-    actionUrl: BOOST_URL,
-    targetTab: null,
-    actionLabel: 'Boost Channel',
   },
   {
     id: 'link_ton_wallet',
@@ -106,6 +121,7 @@ const TASK_CATALOG = [
     description: 'Link Tonkeeper, Telegram Wallet, or MyTonWallet via TON Connect 2.0.',
     category: 'milestone',
     platform: 'ton',
+    verificationMode: 'auto_milestone',
     rewardCents: 5000,
     actionUrl: null,
     targetTab: 'wallet',
@@ -117,6 +133,7 @@ const TASK_CATALOG = [
     description: 'Start and harvest HERT Points from at least 1 mining session.',
     category: 'milestone',
     platform: 'mining',
+    verificationMode: 'auto_milestone',
     rewardCents: 3500,
     actionUrl: null,
     targetTab: 'mining',
@@ -128,21 +145,11 @@ const TASK_CATALOG = [
     description: 'Complete at least 1 daily check-in to start your streak.',
     category: 'milestone',
     platform: 'checkin',
+    verificationMode: 'auto_milestone',
     rewardCents: 2000,
     actionUrl: null,
     targetTab: 'checkin',
     actionLabel: 'Daily Check-In',
-  },
-  {
-    id: 'activate_first_boost',
-    title: 'Activate Any 24-Hour Rate Boost',
-    description: 'Power up your mining chamber with any 24h HERT speed boost.',
-    category: 'milestone',
-    platform: 'boost',
-    rewardCents: 3000,
-    actionUrl: null,
-    targetTab: 'mining',
-    actionLabel: 'View Boosts',
   },
 ];
 
@@ -379,11 +386,19 @@ function resolveRequestUser(req) {
     ? authHeader.slice(4).trim()
     : '';
   const initDataRaw = (req.header('x-telegram-init-data') || tmaInitData).trim();
-  const headerStartParam = (req.header('x-start-param') || '').trim() || null;
+  const queryRef =
+    typeof req.query?.ref === 'string'
+      ? req.query.ref.trim()
+      : typeof req.query?.startapp === 'string'
+        ? req.query.startapp.trim()
+        : '';
+  const bodyRef = typeof req.body?.startParam === 'string' ? req.body.startParam.trim() : '';
+  const fallbackStartParam =
+    (req.header('x-start-param') || '').trim() || queryRef || bodyRef || null;
 
   if (initDataRaw && BOT_TOKEN) {
     const user = verifyTelegramInitData(initDataRaw, BOT_TOKEN);
-    if (!user.startParam && headerStartParam) user.startParam = headerStartParam;
+    if (!user.startParam && fallbackStartParam) user.startParam = fallbackStartParam;
     return user;
   }
 
@@ -400,7 +415,7 @@ function resolveRequestUser(req) {
           lastName: parsed.last_name || null,
           photoUrl: parsed.photo_url || null,
           isPremium: Boolean(parsed.is_premium),
-          startParam: params.get('start_param') || headerStartParam,
+          startParam: params.get('start_param') || fallbackStartParam,
           verified: false,
         };
       }
@@ -468,6 +483,8 @@ async function initDatabase() {
       status TEXT NOT NULL DEFAULT 'active'
     );
     CREATE INDEX IF NOT EXISTS idx_mining_user_status ON mining_sessions(user_id, status);
+    ALTER TABLE mining_sessions ADD COLUMN IF NOT EXISTS banked_cents BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE mining_sessions ADD COLUMN IF NOT EXISTS rate_anchor_at BIGINT;
 
     CREATE TABLE IF NOT EXISTS mining_boosts (
       id BIGSERIAL PRIMARY KEY,
@@ -479,6 +496,12 @@ async function initDatabase() {
       activated_at BIGINT NOT NULL,
       expires_at BIGINT NOT NULL
     );
+    ALTER TABLE mining_boosts ADD COLUMN IF NOT EXISTS boost_tier TEXT NOT NULL DEFAULT 'overclock_50';
+    ALTER TABLE mining_boosts ADD COLUMN IF NOT EXISTS boost_name TEXT NOT NULL DEFAULT 'Overclock Core';
+    ALTER TABLE mining_boosts ADD COLUMN IF NOT EXISTS cost_cents BIGINT NOT NULL DEFAULT 1500;
+    ALTER TABLE mining_boosts ADD COLUMN IF NOT EXISTS bonus_rate_cents_per_hour INTEGER NOT NULL DEFAULT 1500;
+    ALTER TABLE mining_boosts ADD COLUMN IF NOT EXISTS activated_at BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE mining_boosts ADD COLUMN IF NOT EXISTS expires_at BIGINT NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_boosts_user_expires ON mining_boosts(user_id, expires_at DESC);
 
     CREATE TABLE IF NOT EXISTS task_claims (
@@ -486,11 +509,21 @@ async function initDatabase() {
       user_id TEXT NOT NULL,
       task_id TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'started',
+      approval_status TEXT,
+      proof_text TEXT,
+      submitted_at BIGINT,
+      reviewed_at BIGINT,
+      reject_reason TEXT,
       started_at BIGINT NOT NULL,
       claimed_at BIGINT,
       reward_cents BIGINT NOT NULL DEFAULT 0,
       UNIQUE(user_id, task_id)
     );
+    ALTER TABLE task_claims ADD COLUMN IF NOT EXISTS approval_status TEXT;
+    ALTER TABLE task_claims ADD COLUMN IF NOT EXISTS proof_text TEXT;
+    ALTER TABLE task_claims ADD COLUMN IF NOT EXISTS submitted_at BIGINT;
+    ALTER TABLE task_claims ADD COLUMN IF NOT EXISTS reviewed_at BIGINT;
+    ALTER TABLE task_claims ADD COLUMN IF NOT EXISTS reject_reason TEXT;
     CREATE INDEX IF NOT EXISTS idx_task_claims_user ON task_claims(user_id, status);
 
     CREATE TABLE IF NOT EXISTS daily_checkins (
@@ -551,6 +584,33 @@ async function initDatabase() {
       recorded_at BIGINT NOT NULL,
       UNIQUE(user_id, milestone_key)
     );
+
+    CREATE TABLE IF NOT EXISTS allocation_config (
+      id INTEGER PRIMARY KEY,
+      allocation_enabled INTEGER NOT NULL DEFAULT 0,
+      points_per_coin_cents BIGINT NOT NULL DEFAULT 500,
+      tokens_per_point_milli BIGINT NOT NULL DEFAULT 200,
+      min_points_cents BIGINT NOT NULL DEFAULT 0,
+      require_full_checklist INTEGER NOT NULL DEFAULT 0,
+      gas_fee_enabled INTEGER NOT NULL DEFAULT 1,
+      gas_fee_nanoton BIGINT NOT NULL DEFAULT 100000000,
+      receiver_ton_address TEXT,
+      updated_at BIGINT NOT NULL
+    );
+    ALTER TABLE allocation_config ADD COLUMN IF NOT EXISTS points_per_coin_cents BIGINT NOT NULL DEFAULT 500;
+
+    CREATE TABLE IF NOT EXISTS allocation_claims (
+      user_id TEXT PRIMARY KEY,
+      ton_address TEXT NOT NULL,
+      points_snapshot_cents BIGINT NOT NULL,
+      allocated_tokens_cents BIGINT NOT NULL,
+      gas_fee_nanoton BIGINT NOT NULL DEFAULT 0,
+      receiver_ton_address TEXT,
+      tx_boc TEXT,
+      tx_hash TEXT UNIQUE,
+      status TEXT NOT NULL DEFAULT 'claimed',
+      claimed_at BIGINT NOT NULL
+    );
   `);
 
   await pool.query(`
@@ -602,36 +662,40 @@ async function initDatabase() {
 
   await pool.query(`
     INSERT INTO referrals (referrer_id, referred_id, bonus_cents, commission_earned_cents, created_at)
-    SELECT referrer::TEXT, invited_user::TEXT, 5000, 0,
+    SELECT referrer::TEXT, invited_user::TEXT, 2500, 0,
            (EXTRACT(EPOCH FROM COALESCE(rewarded_at, NOW())) * 1000)::BIGINT
     FROM referral_rewards
     ON CONFLICT (referred_id) DO NOTHING
   `);
 
+  const seedReceiverWallet =
+    cleanEnv(process.env.HERT_GAS_RECEIVER_TON_ADDRESS) || DEFAULT_GAS_RECEIVER_TON_ADDRESS;
+  await pool.query(
+    `INSERT INTO allocation_config (
+       id, allocation_enabled, points_per_coin_cents, tokens_per_point_milli,
+       min_points_cents, require_full_checklist, gas_fee_enabled, gas_fee_nanoton,
+       receiver_ton_address, updated_at
+     ) VALUES (1, 0, 500, 200, 0, 0, 1, 100000000, $1, $2::BIGINT)
+     ON CONFLICT (id) DO UPDATE SET
+       receiver_ton_address = COALESCE(NULLIF(TRIM(allocation_config.receiver_ton_address), ''), EXCLUDED.receiver_ton_address)`,
+    [seedReceiverWallet, Date.now()]
+  );
+
   console.log('[HERT Backend] PostgreSQL tables verified and synchronized.');
 }
 
-async function getActiveBoostRow(client, userId, now) {
-  const res = await client.query(
-    `SELECT * FROM mining_boosts
-     WHERE user_id = $1 AND expires_at > $2
-     ORDER BY bonus_rate_cents_per_hour DESC, expires_at DESC
-     LIMIT 1`,
-    [userId, now]
-  );
-  return res.rows[0] || null;
+async function getActiveBoostRow() {
+  return null;
 }
 
-async function computeEffectiveRateCents(client, userId, now) {
+async function computeEffectiveRateCents(client, userId) {
   const refRes = await client.query(
     `SELECT COUNT(*)::INT AS cnt FROM referrals WHERE referrer_id = $1`,
     [userId]
   );
   const invitedCount = Number(refRes.rows[0]?.cnt || 0);
   const boostFriends = Math.min(invitedCount, MAX_REFERRAL_BOOST_FRIENDS);
-  const activeBoost = await getActiveBoostRow(client, userId, now);
-  const boostBonus = activeBoost ? Number(activeBoost.bonus_rate_cents_per_hour) : 0;
-  return BASE_RATE_CENTS_PER_HOUR + boostFriends * REFERRAL_BOOST_PER_FRIEND_CENTS + boostBonus;
+  return BASE_RATE_CENTS_PER_HOUR + boostFriends * REFERRAL_BOOST_PER_FRIEND_CENTS;
 }
 
 function computeSessionState(row, now) {
@@ -676,100 +740,142 @@ function computeSessionState(row, now) {
   };
 }
 
-async function applyReferralInTx(client, inviteeId, rawInput, now) {
+async function applyReferralInTx(client, inviteeId, rawInput, now, options = {}) {
+  const isNewlyRegistered = Boolean(options.isNewlyRegistered);
+  const manualEntry = Boolean(options.manualEntry);
+
   const target = extractReferralTarget(rawInput);
   if (!target) return { applied: false, reason: 'Invalid referral code format.' };
 
   const inviteeRes = await client.query(
-    `SELECT telegram_id::TEXT AS tid, referred_by::TEXT AS referred_by, completed_cycles
-     FROM users WHERE telegram_id::TEXT = $1`,
-    [inviteeId]
+    `SELECT telegram_id::TEXT AS tid,
+            referred_by::TEXT AS referred_by,
+            completed_cycles,
+            total_mined_cents,
+            last_checkin_at,
+            COALESCE(created_at_ms, (EXTRACT(EPOCH FROM COALESCE(created_at, NOW())) * 1000)::BIGINT) AS created_ms
+     FROM users
+     WHERE telegram_id::TEXT = $1
+     FOR UPDATE`,
+    [String(inviteeId)]
   );
   const invitee = inviteeRes.rows[0];
   if (!invitee) return { applied: false, reason: 'User account not found.' };
-  if (invitee.referred_by) return { applied: false, reason: 'An inviter is already linked to your account.' };
-  if (Number(invitee.completed_cycles) > 0) {
-    return { applied: false, reason: 'Referral codes can only be applied before completing your first mining cycle.' };
+  if (invitee.referred_by) {
+    return { applied: false, reason: 'An inviter is already linked to your account.' };
+  }
+
+  const createdMs = Number(invitee.created_ms || now);
+  const isFreshAccount =
+    now - createdMs <= MANUAL_REFERRAL_NEW_USER_WINDOW_MS &&
+    Number(invitee.completed_cycles || 0) === 0 &&
+    Number(invitee.total_mined_cents || 0) === 0 &&
+    !invitee.last_checkin_at;
+
+  if (!isNewlyRegistered && !isFreshAccount) {
+    return {
+      applied: false,
+      reason: manualEntry
+        ? 'Referral codes can only be applied by newly registered users within 30 minutes of joining.'
+        : 'Existing user cannot trigger a new referral reward.',
+    };
   }
 
   let inviterRes;
   if (target.numericTelegramId) {
     inviterRes = await client.query(
-      `SELECT telegram_id::TEXT AS tid, first_name FROM users WHERE telegram_id::TEXT = $1`,
+      `SELECT telegram_id::TEXT AS tid, first_name, referred_by::TEXT AS referred_by
+       FROM users WHERE telegram_id::TEXT = $1`,
       [target.numericTelegramId]
     );
   } else {
     inviterRes = await client.query(
-      `SELECT telegram_id::TEXT AS tid, first_name FROM users WHERE referral_code = $1`,
+      `SELECT telegram_id::TEXT AS tid, first_name, referred_by::TEXT AS referred_by
+       FROM users WHERE UPPER(referral_code) = UPPER($1)`,
       [target.referralCode]
     );
   }
 
   const inviter = inviterRes.rows[0];
   if (!inviter) return { applied: false, reason: 'Referral code not found.' };
-  if (inviter.tid === inviteeId) return { applied: false, reason: 'You cannot use your own referral code.' };
-
-  const existingPair = await client.query(
-    `SELECT id FROM referrals WHERE referred_id = $1`,
-    [inviteeId]
-  );
-  if (existingPair.rows.length > 0) {
-    return { applied: false, reason: 'Referral bonus already claimed.' };
+  if (String(inviter.tid) === String(inviteeId)) {
+    return { applied: false, reason: 'Self-referrals are not allowed.' };
+  }
+  if (inviter.referred_by && String(inviter.referred_by) === String(inviteeId)) {
+    return { applied: false, reason: 'Circular referrals between accounts are not allowed.' };
   }
 
-  if (/^-?\d+$/.test(inviter.tid)) {
+  // Atomic insert with ON CONFLICT (referred_id) DO NOTHING RETURNING id prevents any duplicate reward
+  const insertedRef = await client.query(
+    `INSERT INTO referrals (referrer_id, referred_id, bonus_cents, commission_earned_cents, created_at)
+     VALUES ($1, $2, $3, 0, $4)
+     ON CONFLICT (referred_id) DO NOTHING
+     RETURNING id`,
+    [String(inviter.tid), String(inviteeId), INVITER_JOIN_BONUS_CENTS, now]
+  );
+  if (insertedRef.rows.length === 0) {
+    return { applied: false, reason: 'Referral bonus already claimed for this account.' };
+  }
+
+  if (/^-?\d+$/.test(String(inviteeId)) && /^-?\d+$/.test(String(inviter.tid))) {
+    const rw = await client.query(
+      `INSERT INTO referral_rewards (invited_user, referrer, rewarded_at)
+       VALUES ($1::BIGINT, $2::BIGINT, NOW())
+       ON CONFLICT (invited_user) DO NOTHING
+       RETURNING invited_user`,
+      [String(inviteeId), String(inviter.tid)]
+    );
+    if (rw.rows.length === 0) {
+      await client.query(`DELETE FROM referrals WHERE referred_id = $1`, [String(inviteeId)]);
+      return { applied: false, reason: 'Referral reward already recorded.' };
+    }
+  }
+
+  if (/^-?\d+$/.test(String(inviter.tid))) {
     await client.query(
       `UPDATE users
        SET referred_by = $1::BIGINT,
            points_cents = COALESCE(points_cents, 0) + $2,
-           points = FLOOR((COALESCE(points_cents, 0) + $2) / 100.0)::BIGINT
-       WHERE telegram_id::TEXT = $3`,
-      [inviter.tid, FRIEND_WELCOME_BONUS_CENTS, inviteeId]
+           points = FLOOR((COALESCE(points_cents, 0) + $2) / 100.0)::BIGINT,
+           updated_at = $3
+       WHERE telegram_id::TEXT = $4`,
+      [inviter.tid, FRIEND_WELCOME_BONUS_CENTS, now, String(inviteeId)]
     );
   } else {
     await client.query(
       `UPDATE users
        SET points_cents = COALESCE(points_cents, 0) + $1,
-           points = FLOOR((COALESCE(points_cents, 0) + $1) / 100.0)::BIGINT
-       WHERE telegram_id::TEXT = $2`,
-      [FRIEND_WELCOME_BONUS_CENTS, inviteeId]
+           points = FLOOR((COALESCE(points_cents, 0) + $1) / 100.0)::BIGINT,
+           updated_at = $2
+       WHERE telegram_id::TEXT = $3`,
+      [FRIEND_WELCOME_BONUS_CENTS, now, String(inviteeId)]
     );
   }
 
   await client.query(
     `UPDATE users
      SET points_cents = COALESCE(points_cents, 0) + $1,
-         points = FLOOR((COALESCE(points_cents, 0) + $1) / 100.0)::BIGINT
-     WHERE telegram_id::TEXT = $2`,
-    [INVITER_JOIN_BONUS_CENTS, inviter.tid]
+         points = FLOOR((COALESCE(points_cents, 0) + $1) / 100.0)::BIGINT,
+         updated_at = $2
+     WHERE telegram_id::TEXT = $3`,
+    [INVITER_JOIN_BONUS_CENTS, now, String(inviter.tid)]
   );
-
-  await client.query(
-    `INSERT INTO referrals (referrer_id, referred_id, bonus_cents, commission_earned_cents, created_at)
-     VALUES ($1, $2, $3, 0, $4)
-     ON CONFLICT (referred_id) DO NOTHING`,
-    [inviter.tid, inviteeId, INVITER_JOIN_BONUS_CENTS, now]
-  );
-
-  if (/^-?\d+$/.test(inviteeId) && /^-?\d+$/.test(inviter.tid)) {
-    await client.query(
-      `INSERT INTO referral_rewards (invited_user, referrer, rewarded_at)
-       VALUES ($1::BIGINT, $2::BIGINT, NOW())
-       ON CONFLICT (invited_user) DO NOTHING`,
-      [inviteeId, inviter.tid]
-    );
-  }
 
   await client.query(
     `INSERT INTO point_ledger (user_id, entry_type, amount_cents, description, created_at)
      VALUES ($1, 'welcome_bonus', $2, $3, $4)`,
-    [inviteeId, FRIEND_WELCOME_BONUS_CENTS, `Welcome bonus via ${inviter.first_name || 'Miner'}`, now]
+    [
+      String(inviteeId),
+      FRIEND_WELCOME_BONUS_CENTS,
+      `Welcome bonus via ${inviter.first_name || 'Miner'} (+25 HERT)`,
+      now,
+    ]
   );
 
   await client.query(
     `INSERT INTO point_ledger (user_id, entry_type, amount_cents, description, created_at)
-     VALUES ($1, 'referral_bonus', $2, 'Invited new HERT miner', $3)`,
-    [inviter.tid, INVITER_JOIN_BONUS_CENTS, now]
+     VALUES ($1, 'referral_bonus', $2, 'Invited new HERT miner (+25 HERT)', $3)`,
+    [String(inviter.tid), INVITER_JOIN_BONUS_CENTS, now]
   );
 
   return { applied: true };
@@ -780,9 +886,10 @@ async function ensureUserInTx(client, tgUser, now) {
     `SELECT telegram_id::TEXT AS tid, referral_code, first_name FROM users WHERE telegram_id::TEXT = $1`,
     [tgUser.telegramId]
   );
+  const isNewlyRegistered = existingRes.rows.length === 0;
   const referralCode = existingRes.rows[0]?.referral_code || generateReferralCode(tgUser.telegramId);
 
-  if (existingRes.rows.length === 0) {
+  if (isNewlyRegistered) {
     await client.query(
       `INSERT INTO users (
         telegram_id, username, first_name, last_name, photo_url, is_premium,
@@ -858,7 +965,10 @@ async function ensureUserInTx(client, tgUser, now) {
   }
 
   if (tgUser.startParam) {
-    await applyReferralInTx(client, tgUser.telegramId, tgUser.startParam, now);
+    await applyReferralInTx(client, tgUser.telegramId, tgUser.startParam, now, {
+      isNewlyRegistered,
+      manualEntry: false,
+    });
   }
 }
 
@@ -881,13 +991,29 @@ async function withTransaction(fn) {
 }
 
 async function checkTelegramChannelMembership(telegramId, chatId) {
-  if (!BOT_TOKEN || !/^\d+$/.test(telegramId)) return null;
+  if (!BOT_TOKEN || !/^\d+$/.test(String(telegramId))) return null;
   try {
-    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(chatId)}&user_id=${encodeURIComponent(telegramId)}`;
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${encodeURIComponent(chatId)}&user_id=${encodeURIComponent(String(telegramId))}`;
     const resp = await fetch(url);
     const data = await resp.json();
     if (!data.ok || !data.result?.status) return null;
     return ['creator', 'administrator', 'member', 'restricted'].includes(data.result.status);
+  } catch {
+    return null;
+  }
+}
+
+async function checkTelegramChannelBoost(telegramId, chatId) {
+  if (!BOT_TOKEN || !/^\d+$/.test(String(telegramId))) return null;
+  try {
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUserChatBoosts?chat_id=${encodeURIComponent(chatId)}&user_id=${encodeURIComponent(String(telegramId))}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!data.ok || !Array.isArray(data.result?.boosts)) return null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    return data.result.boosts.some(
+      (b) => !b.expiration_date || Number(b.expiration_date) > nowSec
+    );
   } catch {
     return null;
   }
@@ -1048,7 +1174,28 @@ async function buildDashboardPayload(tgUser, appOrigin) {
           ...def,
           status: 'claimed',
           verifyWaitRemainingSeconds: 0,
+          proofSubmitted: rec.proof_text || null,
+          rejectReason: null,
           claimedAt: rec.claimed_at ? Number(rec.claimed_at) : now,
+        };
+      }
+
+      if (def.verificationMode === 'admin_approval') {
+        let itemStatus = 'available';
+        if (rec?.approval_status === 'pending_approval') {
+          itemStatus = 'pending_approval';
+        } else if (rec?.approval_status === 'rejected') {
+          itemStatus = 'rejected';
+        } else if (rec?.status === 'started') {
+          itemStatus = 'claimable';
+        }
+        return {
+          ...def,
+          status: itemStatus,
+          verifyWaitRemainingSeconds: 0,
+          proofSubmitted: rec?.proof_text || null,
+          rejectReason: rec?.reject_reason || null,
+          claimedAt: null,
         };
       }
 
@@ -1062,17 +1209,19 @@ async function buildDashboardPayload(tgUser, appOrigin) {
           ...def,
           status: met ? 'claimable' : 'available',
           verifyWaitRemainingSeconds: 0,
+          proofSubmitted: null,
+          rejectReason: null,
           claimedAt: null,
         };
       }
 
       if (rec && rec.status === 'started') {
-        const elapsed = now - Number(rec.started_at);
-        const waitRemSec = Math.max(0, Math.ceil((TASK_VERIFY_WAIT_MS - elapsed) / 1000));
         return {
           ...def,
-          status: waitRemSec === 0 ? 'claimable' : 'pending_verify',
-          verifyWaitRemainingSeconds: waitRemSec,
+          status: 'pending_verify',
+          verifyWaitRemainingSeconds: 0,
+          proofSubmitted: null,
+          rejectReason: null,
           claimedAt: null,
         };
       }
@@ -1081,6 +1230,8 @@ async function buildDashboardPayload(tgUser, appOrigin) {
         ...def,
         status: 'available',
         verifyWaitRemainingSeconds: 0,
+        proofSubmitted: null,
+        rejectReason: null,
         claimedAt: null,
       };
     });
@@ -1170,7 +1321,12 @@ async function buildDashboardPayload(tgUser, appOrigin) {
         telegramDeepLink,
         webInviteLink,
         referredByCode,
-        canApplyCode: !userRow.referred_by && Number(userRow.completed_cycles) === 0,
+        canApplyCode:
+          !userRow.referred_by &&
+          Number(userRow.completed_cycles || 0) === 0 &&
+          Number(userRow.total_mined_cents || 0) === 0 &&
+          !lastCheckInAt &&
+          now - Number(userRow.created_at_ms || now) <= MANUAL_REFERRAL_NEW_USER_WINDOW_MS,
         invitedCount: Number(referralSumRes.rows[0]?.cnt || 0),
         totalReferralPointsCents: Number(referralSumRes.rows[0]?.total || 0),
         inviterBonusCents: INVITER_JOIN_BONUS_CENTS,
@@ -1188,30 +1344,86 @@ async function buildDashboardPayload(tgUser, appOrigin) {
         })),
       },
       wallet,
-      allocation: {
-        tokenDeployed: false,
-        tokenSymbol: 'HERT',
-        targetNetwork: 'TON (The Open Network)',
-        recordedPointsCents: effectivePointsCents,
-        criteria,
-        completedCriteriaCount,
-        totalCriteriaCount: 4,
-        distributionModel: [
-          { label: 'Community Mining & Check-In Pool', sharePercent: 55, description: 'Reserved for verified Telegram miners, daily check-in streaks, and referral contributors.' },
-          { label: 'Ecosystem & Strategic Grants', sharePercent: 20, description: 'Dedicated to TON ecosystem integrations, mini-app utilities, and community builders.' },
-          { label: 'Liquidity & Launch Stability', sharePercent: 15, description: 'Provisioned for decentralized exchange liquidity upon future token generation event.' },
-          { label: 'Core Protocol Engineering', sharePercent: 10, description: 'Subject to multi-year linear vesting post-deployment.' },
-        ],
-        history: allocRes.rows.map((a) => ({
-          id: Number(a.id),
-          milestoneKey: a.milestone_key,
-          milestoneLabel: a.milestone_label,
-          readinessCompleted: Number(a.readiness_completed),
-          readinessTotal: Number(a.readiness_total),
-          pointsSnapshotCents: Number(a.points_snapshot_cents),
-          recordedAt: Number(a.recorded_at),
-        })),
-      },
+      allocation: await (async () => {
+        const allocConfig = await getAllocationConfigFromExecutor(client);
+        const claimRes = await client.query(
+          `SELECT * FROM allocation_claims WHERE user_id = $1`,
+          [tgUser.telegramId]
+        );
+        const claimRow = claimRes.rows[0];
+        const userClaim = claimRow
+          ? {
+              tonAddress: claimRow.ton_address,
+              pointsSnapshotCents: Number(claimRow.points_snapshot_cents || 0),
+              allocatedTokensCents: Number(claimRow.allocated_tokens_cents || 0),
+              gasFeeNanoton: String(claimRow.gas_fee_nanoton || '0'),
+              txHash: claimRow.tx_hash || null,
+              status: claimRow.status === 'verified' ? 'verified' : 'claimed',
+              claimedAt: Number(claimRow.claimed_at || now),
+            }
+          : null;
+
+        const allocationRevealed = Boolean(userClaim);
+        const estimatedTokensCents = userClaim ? userClaim.allocatedTokensCents : null;
+
+        let eligibleToClaim = true;
+        let ineligibleReason = null;
+        if (!wallet.connected || !wallet.tonAddress) {
+          eligibleToClaim = false;
+          ineligibleReason = 'Connect your TON wallet first to register a receiving address.';
+        } else if (effectivePointsCents <= 0) {
+          eligibleToClaim = false;
+          ineligibleReason = 'Mine or claim HERT Points first before checking token allocation.';
+        } else if (effectivePointsCents < allocConfig.minPointsCents) {
+          eligibleToClaim = false;
+          ineligibleReason = `Minimum ${(allocConfig.minPointsCents / 100).toFixed(2)} HERT Points required for allocation.`;
+        } else if (allocConfig.requireFullChecklist && completedCriteriaCount < 4) {
+          eligibleToClaim = false;
+          ineligibleReason =
+            'Complete all 4 Readiness steps (Mining, Check-In, and TON Wallet) first.';
+        }
+
+        return {
+          tokenDeployed: allocConfig.allocationEnabled,
+          allocationRevealed,
+          tokenSymbol: 'HERT',
+          targetNetwork: 'TON (The Open Network)',
+          recordedPointsCents: effectivePointsCents,
+          estimatedTokensCents,
+          eligibleToClaim,
+          ineligibleReason,
+          config: {
+            allocationEnabled: allocConfig.allocationEnabled,
+            pointsPerCoin: allocationRevealed ? allocConfig.pointsPerCoin : null,
+            tokensPerPointMilli: allocationRevealed ? allocConfig.tokensPerPointMilli : null,
+            minPointsCents: allocConfig.allocationEnabled ? allocConfig.minPointsCents : 0,
+            requireFullChecklist: allocConfig.requireFullChecklist,
+            gasFeeEnabled: allocConfig.gasFeeEnabled,
+            gasFeeNanoton: allocConfig.gasFeeNanoton,
+            receiverTonAddress: allocConfig.allocationEnabled ? allocConfig.receiverTonAddress : null,
+            updatedAt: allocConfig.updatedAt,
+          },
+          userClaim,
+          criteria,
+          completedCriteriaCount,
+          totalCriteriaCount: 4,
+          distributionModel: [
+            { label: 'Community Mining & Check-In Pool', sharePercent: 55, description: 'Reserved for verified Telegram miners, daily check-in streaks, and referral contributors.' },
+            { label: 'Ecosystem & Strategic Grants', sharePercent: 20, description: 'Dedicated to TON ecosystem integrations, mini-app utilities, and community builders.' },
+            { label: 'Liquidity & Launch Stability', sharePercent: 15, description: 'Provisioned for decentralized exchange liquidity upon future token generation event.' },
+            { label: 'Core Protocol Engineering', sharePercent: 10, description: 'Subject to multi-year linear vesting post-deployment.' },
+          ],
+          history: allocRes.rows.map((a) => ({
+            id: Number(a.id),
+            milestoneKey: a.milestone_key,
+            milestoneLabel: a.milestone_label,
+            readinessCompleted: Number(a.readiness_completed),
+            readinessTotal: Number(a.readiness_total),
+            pointsSnapshotCents: Number(a.points_snapshot_cents),
+            recordedAt: Number(a.recorded_at),
+          })),
+        };
+      })(),
       ledger: ledgerRes.rows.map((l) => ({
         id: Number(l.id),
         entryType: l.entry_type,
@@ -1223,12 +1435,117 @@ async function buildDashboardPayload(tgUser, appOrigin) {
   });
 }
 
+function isValidTonAddress(addr) {
+  const trimmed = String(addr || '').trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  if (
+    /^(EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}$/.test(trimmed) ||
+    /^(EQ|UQ|kQ|0Q)[A-Za-z0-9+/]{46}$/.test(trimmed)
+  ) {
+    return true;
+  }
+  if (/^(-1|0):[0-9a-fA-F]{64}$/.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+function computeAllocatedTokensCents(pointsCents, pointsPerCoin) {
+  if (pointsCents <= 0 || pointsPerCoin <= 0) return 0;
+  const pts = BigInt(Math.max(0, Math.round(pointsCents)));
+  const ppcCents = BigInt(Math.max(1, Math.round(pointsPerCoin * 100)));
+  const computed = (pts * 100n) / ppcCents;
+  const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
+  return Number(computed > maxSafe ? maxSafe : computed);
+}
+
+async function getAllocationConfigFromExecutor(executor) {
+  const envDefaultReceiver =
+    cleanEnv(process.env.HERT_GAS_RECEIVER_TON_ADDRESS) || DEFAULT_GAS_RECEIVER_TON_ADDRESS;
+  if (!executor) {
+    return {
+      allocationEnabled: false,
+      pointsPerCoin: 5,
+      tokensPerPointMilli: 200,
+      minPointsCents: 0,
+      requireFullChecklist: false,
+      gasFeeEnabled: true,
+      gasFeeNanoton: '100000000',
+      receiverTonAddress: envDefaultReceiver,
+      updatedAt: 0,
+    };
+  }
+  const res = await executor.query(`SELECT * FROM allocation_config WHERE id = 1 LIMIT 1`);
+  if (res.rows.length === 0) {
+    return {
+      allocationEnabled: false,
+      pointsPerCoin: 5,
+      tokensPerPointMilli: 200,
+      minPointsCents: 0,
+      requireFullChecklist: false,
+      gasFeeEnabled: true,
+      gasFeeNanoton: '100000000',
+      receiverTonAddress: envDefaultReceiver,
+      updatedAt: 0,
+    };
+  }
+  const r = res.rows[0];
+  const rawPpcCents = Number(r.points_per_coin_cents || 0);
+  const pointsPerCoin =
+    rawPpcCents > 0
+      ? rawPpcCents / 100
+      : Number(r.tokens_per_point_milli) > 0
+        ? Number((1000 / Number(r.tokens_per_point_milli)).toFixed(4))
+        : 5;
+  const tokensPerPointMilli = Math.max(1, Math.round((1 / pointsPerCoin) * 1000));
+
+  return {
+    allocationEnabled: Boolean(Number(r.allocation_enabled)),
+    pointsPerCoin,
+    tokensPerPointMilli,
+    minPointsCents: Math.max(0, Number(r.min_points_cents || 0)),
+    requireFullChecklist: Boolean(Number(r.require_full_checklist)),
+    gasFeeEnabled: Boolean(Number(r.gas_fee_enabled)),
+    gasFeeNanoton: String(r.gas_fee_nanoton || '100000000'),
+    receiverTonAddress: (r.receiver_ton_address && r.receiver_ton_address.trim()) || envDefaultReceiver,
+    updatedAt: Number(r.updated_at || 0),
+  };
+}
+
+function validateAndHashTonBoc(rawBoc) {
+  const cleanBoc = String(rawBoc || '').trim();
+  if (!cleanBoc || cleanBoc.length < 32 || cleanBoc.length > 65536) {
+    throw new Error('Missing or invalid signed TON transaction proof (BOC).');
+  }
+  const normalizedBase64 = cleanBoc.replace(/-/g, '+').replace(/_/g, '/');
+  const buf = Buffer.from(normalizedBase64, 'base64');
+  if (buf.length < 24) {
+    throw new Error('Malformed TON transaction BOC payload.');
+  }
+  const magic = buf.readUInt32BE(0);
+  const validMagics = new Set([0xb5ee9c72, 0x68ff65f3, 0xacc3a728]);
+  if (!validMagics.has(magic)) {
+    throw new Error('Invalid TON Bag-of-Cells (BOC) signature header.');
+  }
+  const txHash = crypto.createHash('sha256').update(buf).digest('hex');
+  return { cleanBoc, txHash };
+}
+
+function escapeCsvCell(val) {
+  const str = val === null || val === undefined ? '' : String(val);
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
 async function getAdminDashboardPayload(caller, options = {}) {
   if (!pool) {
     throw new Error('PostgreSQL DATABASE_URL is not configured on Render.');
   }
   const now = Date.now();
   const activeWindowFloorMs = now - 24 * 60 * 60 * 1000;
+  const allocationConfig = await getAllocationConfigFromExecutor(pool);
   const rawSearch = String(options.search || '').trim().replace(/^#/, '');
   const cleanSearch = rawSearch.replace(/[^0-9a-zA-Z_-]/g, '').slice(0, 32);
   const limit = Math.min(100, Math.max(1, Math.floor(Number(options.limit) || 50)));
@@ -1266,6 +1583,10 @@ async function getAdminDashboardPayload(caller, options = {}) {
           s.latest_session_started_at
         ) AS resolved_last_mine_ms,
         s.active_ends_at,
+        COALESCE(ac.ton_address, wc.ton_address) AS ton_address,
+        ac.status AS alloc_claim_status,
+        ac.allocated_tokens_cents AS alloc_tokens_cents,
+        ac.gas_fee_nanoton AS alloc_gas_nanoton,
         ROW_NUMBER() OVER (
           ORDER BY
             GREATEST(COALESCE(u.points_cents, 0), COALESCE(u.points, 0) * 100) DESC,
@@ -1276,6 +1597,8 @@ async function getAdminDashboardPayload(caller, options = {}) {
       FROM users u
       LEFT JOIN session_agg s ON s.user_id = u.telegram_id::TEXT
       LEFT JOIN ref_agg r ON r.referrer_id = u.telegram_id::TEXT
+      LEFT JOIN wallet_connections wc ON wc.user_id = u.telegram_id::TEXT
+      LEFT JOIN allocation_claims ac ON ac.user_id = u.telegram_id::TEXT
     )
   `;
 
@@ -1286,7 +1609,10 @@ async function getAdminDashboardPayload(caller, options = {}) {
        COALESCE(SUM(effective_points_cents), 0)::BIGINT AS total_points_cents,
        COALESCE(SUM(CASE WHEN active_ends_at IS NOT NULL AND active_ends_at > $1 THEN 1 ELSE 0 END), 0)::INT AS live_mining_sessions,
        COALESCE(SUM(CASE WHEN active_ends_at IS NOT NULL OR (resolved_last_mine_ms IS NOT NULL AND resolved_last_mine_ms >= $2) THEN 1 ELSE 0 END), 0)::INT AS active_miners,
-       COALESCE(SUM(CASE WHEN completed_cycles > 0 OR total_mined_cents > 0 OR resolved_last_mine_ms IS NOT NULL OR active_ends_at IS NOT NULL THEN 1 ELSE 0 END), 0)::INT AS ever_mined_users
+       COALESCE(SUM(CASE WHEN completed_cycles > 0 OR total_mined_cents > 0 OR resolved_last_mine_ms IS NOT NULL OR active_ends_at IS NOT NULL THEN 1 ELSE 0 END), 0)::INT AS ever_mined_users,
+       COALESCE(SUM(CASE WHEN ton_address IS NOT NULL THEN 1 ELSE 0 END), 0)::INT AS wallet_linked_users,
+       COALESCE(SUM(CASE WHEN alloc_claim_status IS NOT NULL THEN 1 ELSE 0 END), 0)::INT AS claimed_allocations_count,
+       COALESCE(SUM(COALESCE(alloc_gas_nanoton, 0)), 0)::BIGINT AS total_gas_fee_nanoton
      FROM ranked_users`,
     [now, activeWindowFloorMs]
   );
@@ -1332,6 +1658,13 @@ async function getAdminDashboardPayload(caller, options = {}) {
       miningStatus = 'idle';
     }
 
+    const gasPaidNum = row.alloc_gas_nanoton ? Number(row.alloc_gas_nanoton) : 0;
+    const claimStatus = row.alloc_claim_status
+      ? gasPaidNum > 0
+        ? 'gas_paid'
+        : 'claimed'
+      : null;
+
     return {
       rank: Number(row.global_rank),
       telegramId: String(row.telegram_id),
@@ -1346,6 +1679,38 @@ async function getAdminDashboardPayload(caller, options = {}) {
       lastMineAt,
       activeSessionEndsAt,
       miningStatus,
+      tonAddress: row.ton_address || null,
+      claimStatus,
+      claimedTokensCents:
+        row.alloc_tokens_cents !== null && row.alloc_tokens_cents !== undefined
+          ? Number(row.alloc_tokens_cents)
+          : null,
+      gasFeePaidNanoton: row.alloc_gas_nanoton ? String(row.alloc_gas_nanoton) : null,
+    };
+  });
+
+  const pendingTasksRes = await pool.query(
+    `SELECT tc.user_id, tc.task_id, tc.proof_text, tc.submitted_at, tc.started_at,
+            u.first_name, u.username
+     FROM task_claims tc
+     LEFT JOIN users u ON u.telegram_id::TEXT = tc.user_id
+     WHERE tc.status = 'started' AND tc.approval_status = 'pending_approval'
+     ORDER BY COALESCE(tc.submitted_at, tc.started_at) ASC
+     LIMIT 100`
+  );
+  const catalogById = new Map(TASK_CATALOG.map((t) => [t.id, t]));
+  const pendingTaskClaims = pendingTasksRes.rows.map((row) => {
+    const def = catalogById.get(row.task_id);
+    return {
+      userId: String(row.user_id),
+      firstName: row.first_name || row.username || `Miner #${String(row.user_id).slice(-4)}`,
+      username: row.username || null,
+      taskId: row.task_id,
+      taskTitle: def?.title || row.task_id,
+      rewardCents: def?.rewardCents || 3500,
+      proofText: row.proof_text || '',
+      submittedAt: Number(row.submitted_at || row.started_at || now),
+      status: 'pending_approval',
     };
   });
 
@@ -1356,8 +1721,13 @@ async function getAdminDashboardPayload(caller, options = {}) {
       liveMiningSessions: Number(statsRow.live_mining_sessions || 0),
       everMinedUsers: Number(statsRow.ever_mined_users || 0),
       totalPointsCents: Number(statsRow.total_points_cents || 0),
+      walletLinkedUsers: Number(statsRow.wallet_linked_users || 0),
+      claimedAllocationsCount: Number(statsRow.claimed_allocations_count || 0),
+      totalGasFeeNanoton: String(statsRow.total_gas_fee_nanoton || '0'),
       serverTime: now,
     },
+    allocationConfig,
+    pendingTaskClaims,
     users,
     pagination: {
       search: cleanSearch,
@@ -1655,7 +2025,10 @@ app.post('/api/referrals/apply', async (req, res) => {
     const now = Date.now();
     await withTransaction(async (client) => {
       await ensureUserInTx(client, tgUser, now);
-      const outcome = await applyReferralInTx(client, tgUser.telegramId, code, now);
+      const outcome = await applyReferralInTx(client, tgUser.telegramId, code, now, {
+        isNewlyRegistered: false,
+        manualEntry: true,
+      });
       if (!outcome.applied) {
         throw new Error(outcome.reason || 'Unable to apply referral code.');
       }
@@ -1667,6 +2040,72 @@ app.post('/api/referrals/apply', async (req, res) => {
   }
 });
 
+app.get('/api/referrals/friends', async (req, res) => {
+  try {
+    const tgUser = resolveRequestUser(req);
+    const limit = Math.min(50, Math.max(1, Math.floor(Number(req.query.limit) || 20)));
+    const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+    const countRes = await pool.query(
+      `SELECT COUNT(*)::INT AS cnt FROM referrals WHERE referrer_id = $1`,
+      [String(tgUser.telegramId)]
+    );
+    const totalCount = Number(countRes.rows[0]?.cnt || 0);
+    const rowsRes = await pool.query(
+      `SELECT r.referred_id, r.bonus_cents, r.commission_earned_cents, r.created_at,
+              u.first_name, u.username, u.completed_cycles
+       FROM referrals r
+       LEFT JOIN users u ON u.telegram_id::TEXT = r.referred_id
+       WHERE r.referrer_id = $1
+       ORDER BY r.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [String(tgUser.telegramId), limit, offset]
+    );
+    const items = rowsRes.rows.map((f) => ({
+      telegramId: String(f.referred_id),
+      firstName: f.first_name || f.username || `Miner #${String(f.referred_id).slice(-4)}`,
+      username: f.username || null,
+      joinedAt: Number(f.created_at),
+      bonusCents: Number(f.bonus_cents),
+      commissionEarnedCents: Number(f.commission_earned_cents),
+      completedCycles: Number(f.completed_cycles || 0),
+    }));
+    res.json({ items, totalCount, hasMore: offset + items.length < totalCount });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to load referred friends.' });
+  }
+});
+
+app.get('/api/ledger', async (req, res) => {
+  try {
+    const tgUser = resolveRequestUser(req);
+    const limit = Math.min(50, Math.max(1, Math.floor(Number(req.query.limit) || 20)));
+    const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+    const countRes = await pool.query(
+      `SELECT COUNT(*)::INT AS cnt FROM point_ledger WHERE user_id = $1`,
+      [String(tgUser.telegramId)]
+    );
+    const totalCount = Number(countRes.rows[0]?.cnt || 0);
+    const rowsRes = await pool.query(
+      `SELECT id, entry_type, amount_cents, description, created_at
+       FROM point_ledger
+       WHERE user_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT $2 OFFSET $3`,
+      [String(tgUser.telegramId), limit, offset]
+    );
+    const items = rowsRes.rows.map((l) => ({
+      id: Number(l.id),
+      entryType: l.entry_type,
+      amountCents: Number(l.amount_cents),
+      description: l.description,
+      createdAt: Number(l.created_at),
+    }));
+    res.json({ items, totalCount, hasMore: offset + items.length < totalCount });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to load ledger entries.' });
+  }
+});
+
 app.post('/api/boosts/buy', async (req, res) => {
   try {
     const tgUser = resolveRequestUser(req);
@@ -1675,12 +2114,13 @@ app.post('/api/boosts/buy', async (req, res) => {
     if (!tier) throw new Error('Selected boost tier does not exist.');
 
     const now = Date.now();
+    const userIdStr = String(tgUser.telegramId);
     await withTransaction(async (client) => {
       await ensureUserInTx(client, tgUser, now);
 
       const userRes = await client.query(
         `SELECT points, points_cents FROM users WHERE telegram_id::TEXT = $1 FOR UPDATE`,
-        [tgUser.telegramId]
+        [userIdStr]
       );
       const balanceCents = Math.max(
         Number(userRes.rows[0]?.points_cents || 0),
@@ -1690,7 +2130,7 @@ app.post('/api/boosts/buy', async (req, res) => {
         throw new Error(`Insufficient balance. You need ${(tier.costCents / 100).toFixed(2)} HERT Points.`);
       }
 
-      const activeBoost = await getActiveBoostRow(client, tgUser.telegramId, now);
+      const activeBoost = await getActiveBoostRow(client, userIdStr, now);
       if (activeBoost) {
         const currentBonus = Number(activeBoost.bonus_rate_cents_per_hour);
         if (currentBonus >= tier.bonusRateCentsPerHour) {
@@ -1700,40 +2140,53 @@ app.post('/api/boosts/buy', async (req, res) => {
               : `A higher boost (${activeBoost.boost_name}) is already active.`
           );
         }
-        await client.query(`UPDATE mining_boosts SET expires_at = $1 WHERE id = $2`, [now, activeBoost.id]);
+        await client.query(`UPDATE mining_boosts SET expires_at = $1::BIGINT WHERE id = $2`, [
+          now,
+          activeBoost.id,
+        ]);
       }
 
       const newBalanceCents = balanceCents - tier.costCents;
+      const newWholePoints = Math.floor(newBalanceCents / 100);
       await client.query(
         `UPDATE users
-         SET points_cents = $1,
-             points = FLOOR($1 / 100.0)::BIGINT
-         WHERE telegram_id::TEXT = $2`,
-        [newBalanceCents, tgUser.telegramId]
+         SET points_cents = $1::BIGINT,
+             points = $2::BIGINT,
+             updated_at = $3::BIGINT
+         WHERE telegram_id::TEXT = $4`,
+        [newBalanceCents, newWholePoints, now, userIdStr]
       );
 
       await client.query(
         `INSERT INTO mining_boosts (user_id, boost_tier, boost_name, cost_cents, bonus_rate_cents_per_hour, activated_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [tgUser.telegramId, tier.id, tier.name, tier.costCents, tier.bonusRateCentsPerHour, now, now + tier.durationMs]
+         VALUES ($1, $2, $3, $4::BIGINT, $5::INTEGER, $6::BIGINT, $7::BIGINT)`,
+        [
+          userIdStr,
+          tier.id,
+          tier.name,
+          tier.costCents,
+          tier.bonusRateCentsPerHour,
+          now,
+          now + tier.durationMs,
+        ]
       );
 
       await client.query(
         `INSERT INTO point_ledger (user_id, entry_type, amount_cents, description, created_at)
-         VALUES ($1, 'boost_purchase', $2, $3, $4)`,
-        [tgUser.telegramId, -tier.costCents, `Activated 24h ${tier.name}`, now]
+         VALUES ($1, 'boost_purchase', $2::BIGINT, $3, $4::BIGINT)`,
+        [userIdStr, -tier.costCents, `Activated 24h ${tier.name}`, now]
       );
 
-      const newEffectiveRate = await computeEffectiveRateCents(client, tgUser.telegramId, now);
+      const newEffectiveRate = await computeEffectiveRateCents(client, userIdStr, now);
       const activeSessionRes = await client.query(
         `SELECT * FROM mining_sessions WHERE user_id = $1 AND claimed_at IS NULL ORDER BY id DESC LIMIT 1`,
-        [tgUser.telegramId]
+        [userIdStr]
       );
       const session = activeSessionRes.rows[0];
       if (session && now < Number(session.ends_at)) {
         const snap = computeSessionState(session, now);
         await client.query(
-          `UPDATE mining_sessions SET banked_cents = $1, rate_anchor_at = $2, rate_cents_per_hour = $3 WHERE id = $4`,
+          `UPDATE mining_sessions SET banked_cents = $1::BIGINT, rate_anchor_at = $2::BIGINT, rate_cents_per_hour = $3::INTEGER WHERE id = $4`,
           [snap.accruedCents, now, newEffectiveRate, session.id]
         );
       }
@@ -1754,11 +2207,12 @@ app.post('/api/tasks/start', async (req, res) => {
     if (!task) throw new Error('Task not found.');
 
     const now = Date.now();
+    const userIdStr = String(tgUser.telegramId);
     await withTransaction(async (client) => {
       await ensureUserInTx(client, tgUser, now);
       const existing = await client.query(
         `SELECT * FROM task_claims WHERE user_id = $1 AND task_id = $2`,
-        [tgUser.telegramId, task.id]
+        [userIdStr, task.id]
       );
       if (existing.rows[0]?.status === 'claimed') {
         throw new Error('This task reward has already been claimed.');
@@ -1766,8 +2220,8 @@ app.post('/api/tasks/start', async (req, res) => {
       if (existing.rows.length === 0) {
         await client.query(
           `INSERT INTO task_claims (user_id, task_id, status, started_at, reward_cents)
-           VALUES ($1, $2, 'started', $3, $4)`,
-          [tgUser.telegramId, task.id, now, task.rewardCents]
+           VALUES ($1, $2, 'started', $3, 0)`,
+          [userIdStr, task.id, now]
         );
       }
     });
@@ -1779,96 +2233,182 @@ app.post('/api/tasks/start', async (req, res) => {
   }
 });
 
+async function submitPartnerTaskProofInTx(tgUser, task, rawProofText) {
+  const cleanProof = String(rawProofText || '').trim().replace(/\s+/g, ' ');
+  if (cleanProof.length < 2 || cleanProof.length > 160) {
+    throw new Error(
+      'Enter the valid username, handle, or account ID you registered with (2–160 characters).'
+    );
+  }
+
+  const now = Date.now();
+  const userIdStr = String(tgUser.telegramId);
+  await withTransaction(async (client) => {
+    await ensureUserInTx(client, tgUser, now);
+    const existing = await client.query(
+      `SELECT status, approval_status FROM task_claims WHERE user_id = $1 AND task_id = $2 FOR UPDATE`,
+      [userIdStr, task.id]
+    );
+    if (existing.rows.length === 0) {
+      await client.query(
+        `INSERT INTO task_claims (
+           user_id, task_id, status, started_at, reward_cents,
+           approval_status, proof_text, submitted_at, reject_reason
+         ) VALUES ($1, $2, 'started', $3::BIGINT, 0, 'pending_approval', $4, $3::BIGINT, NULL)`,
+        [userIdStr, task.id, now, cleanProof]
+      );
+      return;
+    }
+    if (existing.rows[0].status === 'claimed') {
+      throw new Error('This one-time task reward has already been claimed.');
+    }
+    if (existing.rows[0].approval_status === 'pending_approval') {
+      throw new Error('Your verification request is already pending admin approval.');
+    }
+
+    await client.query(
+      `UPDATE task_claims
+       SET approval_status = 'pending_approval',
+           proof_text = $1,
+           submitted_at = $2::BIGINT,
+           reject_reason = NULL
+       WHERE user_id = $3 AND task_id = $4 AND status != 'claimed'`,
+      [cleanProof, now, userIdStr, task.id]
+    );
+  });
+}
+
+app.post('/api/tasks/submit-proof', async (req, res) => {
+  try {
+    const tgUser = resolveRequestUser(req);
+    const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
+    const proofText = typeof req.body?.proofText === 'string' ? req.body.proofText : '';
+    const task = TASK_CATALOG.find((t) => t.id === taskId);
+    if (!task || task.verificationMode !== 'admin_approval') {
+      throw new Error('Invalid partner verification task selected.');
+    }
+
+    await submitPartnerTaskProofInTx(tgUser, task, proofText);
+    const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
+    res.json({ status: 'pending_approval', title: task.title, payload });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to submit task verification.' });
+  }
+});
+
 app.post('/api/tasks/claim', async (req, res) => {
   try {
     const tgUser = resolveRequestUser(req);
     const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
+    const proofText = typeof req.body?.proofText === 'string' ? req.body.proofText : '';
     const task = TASK_CATALOG.find((t) => t.id === taskId);
     if (!task) throw new Error('Task not found.');
 
-    if (task.id === 'join_tg_channel' && tgUser.verified) {
+    // Partner tasks require real verification / admin approval — clicking a link is never enough
+    if (task.verificationMode === 'admin_approval') {
+      if (!proofText.trim()) {
+        throw new Error(
+          `Clicking the link alone is not proof of completion. Enter the username or ID you joined ${task.title} with to submit for verification.`
+        );
+      }
+      await submitPartnerTaskProofInTx(tgUser, task, proofText);
+      const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
+      res.json({ rewardCents: 0, title: task.title, pendingApproval: true, payload });
+      return;
+    }
+
+    let liveTelegramVerified = false;
+    if (task.id === 'join_tg_channel') {
+      if (!tgUser.verified) {
+        throw new Error(
+          'Open HERT Mining inside Telegram (@HERTCoinBot) to verify your channel subscription.'
+        );
+      }
       const isMember = await checkTelegramChannelMembership(tgUser.telegramId, CHANNEL_ID);
       if (isMember === false) {
-        throw new Error(`Not joined yet â€” tap "${task.actionLabel}" to subscribe first, then return and claim.`);
+        throw new Error(`Not joined yet — tap "${task.actionLabel}" to subscribe first, then return and claim.`);
       }
+      if (isMember === null) {
+        throw new Error(
+          `Channel verification pending admin setup: add @${BOT_USERNAME} as an Administrator in ${CHANNEL_ID} so Telegram allows subscriber verification.`
+        );
+      }
+      liveTelegramVerified = true;
     }
 
     const now = Date.now();
+    const userIdStr = String(tgUser.telegramId);
+
     await withTransaction(async (client) => {
       await ensureUserInTx(client, tgUser, now);
 
       const existing = await client.query(
         `SELECT * FROM task_claims WHERE user_id = $1 AND task_id = $2 FOR UPDATE`,
-        [tgUser.telegramId, task.id]
+        [userIdStr, task.id]
       );
       if (existing.rows[0]?.status === 'claimed') {
         throw new Error('Task bonus already claimed.');
       }
 
       if (task.category === 'social') {
-        if (existing.rows.length === 0) {
-          throw new Error(`Open "${task.actionLabel}" first before claiming this task bonus.`);
+        if (!liveTelegramVerified) {
+          throw new Error(`Verify subscription to ${CHANNEL_ID} first before claiming.`);
         }
-        const elapsed = now - Number(existing.rows[0].started_at);
-        if (elapsed < TASK_VERIFY_WAIT_MS) {
-          const rem = Math.max(1, Math.ceil((TASK_VERIFY_WAIT_MS - elapsed) / 1000));
-          throw new Error(`Verification in progress. Please try claiming again in ${rem}s.`);
-        }
+
         await client.query(
-          `UPDATE task_claims SET status = 'claimed', claimed_at = $1, reward_cents = $2 WHERE id = $3`,
-          [now, task.rewardCents, existing.rows[0].id]
+          `INSERT INTO task_claims (user_id, task_id, status, started_at, claimed_at, reward_cents)
+           VALUES ($1, $2, 'claimed', $3::BIGINT, $3::BIGINT, $4::BIGINT)
+           ON CONFLICT (user_id, task_id)
+           DO UPDATE SET status = 'claimed', claimed_at = EXCLUDED.claimed_at, reward_cents = EXCLUDED.reward_cents`,
+          [userIdStr, task.id, now, task.rewardCents]
         );
       } else {
         const uRes = await client.query(
           `SELECT completed_cycles, checkin_streak FROM users WHERE telegram_id::TEXT = $1`,
-          [tgUser.telegramId]
+          [userIdStr]
         );
         const wRes = await client.query(
           `SELECT user_id FROM wallet_connections WHERE user_id = $1`,
-          [tgUser.telegramId]
+          [userIdStr]
         );
         const cRes = await client.query(
           `SELECT COUNT(*)::INT AS cnt FROM daily_checkins WHERE user_id = $1`,
-          [tgUser.telegramId]
-        );
-        const bRes = await client.query(
-          `SELECT COUNT(*)::INT AS cnt FROM mining_boosts WHERE user_id = $1`,
-          [tgUser.telegramId]
+          [userIdStr]
         );
 
         let met = false;
         if (task.id === 'link_ton_wallet') met = wRes.rows.length > 0;
         if (task.id === 'complete_first_cycle') met = Number(uRes.rows[0]?.completed_cycles || 0) >= 1;
         if (task.id === 'complete_first_checkin') met = Number(cRes.rows[0]?.cnt || 0) >= 1;
-        if (task.id === 'activate_first_boost') met = Number(bRes.rows[0]?.cnt || 0) > 0;
         if (!met) throw new Error('Complete the milestone requirement first before claiming.');
 
         await client.query(
           `INSERT INTO task_claims (user_id, task_id, status, started_at, claimed_at, reward_cents)
-           VALUES ($1, $2, 'claimed', $3, $3, $4)
+           VALUES ($1, $2, 'claimed', $3::BIGINT, $3::BIGINT, $4::BIGINT)
            ON CONFLICT (user_id, task_id)
            DO UPDATE SET status = 'claimed', claimed_at = EXCLUDED.claimed_at, reward_cents = EXCLUDED.reward_cents`,
-          [tgUser.telegramId, task.id, now, task.rewardCents]
+          [userIdStr, task.id, now, task.rewardCents]
         );
       }
 
       await client.query(
         `UPDATE users
-         SET points_cents = COALESCE(points_cents, 0) + $1,
-             points = FLOOR((COALESCE(points_cents, 0) + $1) / 100.0)::BIGINT
-         WHERE telegram_id::TEXT = $2`,
-        [task.rewardCents, tgUser.telegramId]
+         SET points_cents = COALESCE(points_cents, 0) + $1::BIGINT,
+             points = FLOOR((COALESCE(points_cents, 0) + $1::BIGINT) / 100.0)::BIGINT,
+             updated_at = $2::BIGINT
+         WHERE telegram_id::TEXT = $3`,
+        [task.rewardCents, now, userIdStr]
       );
 
       await client.query(
         `INSERT INTO point_ledger (user_id, entry_type, amount_cents, description, created_at)
-         VALUES ($1, 'task_reward', $2, $3, $4)`,
-        [tgUser.telegramId, task.rewardCents, `Task completed: ${task.title}`, now]
+         VALUES ($1, 'task_reward', $2::BIGINT, $3, $4::BIGINT)`,
+        [userIdStr, task.rewardCents, `Task completed: ${task.title}`, now]
       );
     });
 
     const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
-    res.json({ rewardCents: task.rewardCents, title: task.title, payload });
+    res.json({ rewardCents: task.rewardCents, title: task.title, pendingApproval: false, payload });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Unable to claim task bonus.' });
   }
@@ -1952,6 +2492,139 @@ app.post('/api/wallet/disconnect', async (req, res) => {
     res.json({ payload });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Failed to disconnect wallet.' });
+  }
+});
+
+app.post('/api/allocation/claim', async (req, res) => {
+  try {
+    const tgUser = resolveRequestUser(req);
+    const now = Date.now();
+    const claim = await withTransaction(async (client) => {
+      await ensureUserInTx(client, tgUser, now);
+
+      const config = await getAllocationConfigFromExecutor(client);
+      if (!config.allocationEnabled) {
+        throw new Error('Token allocation claiming is not open yet. Please wait for the official announcement.');
+      }
+
+      const existing = await client.query(
+        `SELECT * FROM allocation_claims WHERE user_id = $1 FOR UPDATE`,
+        [tgUser.telegramId]
+      );
+      if (existing.rows.length > 0) {
+        throw new Error('Your HERT token allocation claim has already been registered.');
+      }
+
+      const wRes = await client.query(
+        `SELECT ton_address FROM wallet_connections WHERE user_id = $1`,
+        [tgUser.telegramId]
+      );
+      const registeredAddress = wRes.rows[0]?.ton_address || String(req.body?.tonAddress || '').trim();
+      if (!registeredAddress || !isValidTonAddress(registeredAddress)) {
+        throw new Error('Connect a valid non-custodial TON wallet first before claiming your allocation.');
+      }
+
+      const uRes = await client.query(
+        `SELECT GREATEST(COALESCE(points_cents, 0), COALESCE(points, 0) * 100)::BIGINT AS pts,
+                COALESCE(completed_cycles, 0)::INT AS completed_cycles
+         FROM users WHERE telegram_id::TEXT = $1`,
+        [tgUser.telegramId]
+      );
+      const pointsCents = Number(uRes.rows[0]?.pts || 0);
+      const completedCycles = Number(uRes.rows[0]?.completed_cycles || 0);
+
+      if (pointsCents <= 0) {
+        throw new Error('You need verified HERT Points before claiming an allocation.');
+      }
+      if (pointsCents < config.minPointsCents) {
+        throw new Error(
+          `You need at least ${(config.minPointsCents / 100).toFixed(2)} HERT Points to qualify for allocation.`
+        );
+      }
+
+      if (config.requireFullChecklist) {
+        const cRes = await client.query(
+          `SELECT COUNT(*)::INT AS cnt FROM daily_checkins WHERE user_id = $1`,
+          [tgUser.telegramId]
+        );
+        const hasCheckIn = Number(cRes.rows[0]?.cnt || 0) >= 1;
+        if (completedCycles < 1 || !hasCheckIn) {
+          throw new Error(
+            'Complete at least 1 mining session and 1 daily check-in to unlock allocation claiming.'
+          );
+        }
+      }
+
+      const allocatedTokensCents = computeAllocatedTokensCents(
+        pointsCents,
+        config.pointsPerCoin
+      );
+      if (allocatedTokensCents <= 0) {
+        throw new Error('Calculated HERT token allocation must be greater than zero.');
+      }
+
+      let requiredFeeNanoton = '0';
+      let receiverTonAddress = null;
+      let cleanBoc = null;
+      let txHash = null;
+      let claimStatus = 'claimed';
+
+      if (config.gasFeeEnabled) {
+        if (!config.receiverTonAddress || !isValidTonAddress(config.receiverTonAddress)) {
+          throw new Error(
+            'Allocation gas fee treasury wallet is not configured on the server yet. Please contact the administrator.'
+          );
+        }
+        const parsedBoc = validateAndHashTonBoc(req.body?.txBoc || '');
+        const dupCheck = await client.query(
+          `SELECT user_id FROM allocation_claims WHERE tx_hash = $1`,
+          [parsedBoc.txHash]
+        );
+        if (dupCheck.rows.length > 0) {
+          throw new Error('This TON gas fee transaction has already been used.');
+        }
+
+        requiredFeeNanoton = config.gasFeeNanoton;
+        receiverTonAddress = config.receiverTonAddress;
+        cleanBoc = parsedBoc.cleanBoc;
+        txHash = parsedBoc.txHash;
+        claimStatus = 'verified';
+      }
+
+      await client.query(
+        `INSERT INTO allocation_claims (
+          user_id, ton_address, points_snapshot_cents, allocated_tokens_cents,
+          gas_fee_nanoton, receiver_ton_address, tx_boc, tx_hash, status, claimed_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          tgUser.telegramId,
+          registeredAddress,
+          pointsCents,
+          allocatedTokensCents,
+          requiredFeeNanoton,
+          receiverTonAddress,
+          cleanBoc,
+          txHash,
+          claimStatus,
+          now,
+        ]
+      );
+
+      return {
+        tonAddress: registeredAddress,
+        pointsSnapshotCents: pointsCents,
+        allocatedTokensCents,
+        gasFeeNanoton: requiredFeeNanoton,
+        txHash,
+        status: claimStatus,
+        claimedAt: now,
+      };
+    });
+
+    const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
+    res.json({ claim, payload });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to register allocation claim.' });
   }
 });
 
@@ -2040,6 +2713,283 @@ app.get('/api/admin/dashboard', async (req, res) => {
   }
 });
 
+app.post('/api/admin/allocation-config', async (req, res) => {
+  try {
+    verifyAdminRequest(req);
+    if (!pool) {
+      throw new Error('PostgreSQL DATABASE_URL is not configured on Render.');
+    }
+
+    const pointsPerCoin = Number(req.body?.pointsPerCoin ?? 5);
+    if (!Number.isFinite(pointsPerCoin) || pointsPerCoin < 0.01 || pointsPerCoin > 1000000) {
+      res.status(400).json({ error: 'Enter a valid ratio between 0.01 and 1,000,000 Points per 1 HERT Coin.' });
+      return;
+    }
+    const pointsPerCoinCents = Math.max(1, Math.round(pointsPerCoin * 100));
+    const tokensPerPointMilli = Math.max(1, Math.round((1 / pointsPerCoin) * 1000));
+
+    const minPoints = Number(req.body?.minPoints ?? 0);
+    if (!Number.isFinite(minPoints) || minPoints < 0 || minPoints > 1000000000) {
+      res.status(400).json({ error: 'Minimum points requirement must be 0 or a positive number.' });
+      return;
+    }
+    const minPointsCents = Math.round(minPoints * 100);
+
+    const gasFeeEnabled = Boolean(req.body?.gasFeeEnabled);
+    const gasFeeTon = Number(req.body?.gasFeeTon ?? 0.1);
+    if (!Number.isFinite(gasFeeTon) || gasFeeTon < 0 || gasFeeTon > 100) {
+      res.status(400).json({ error: 'TON gas fee must be between 0 and 100 TON.' });
+      return;
+    }
+    if (gasFeeEnabled && gasFeeTon < 0.01) {
+      res.status(400).json({ error: 'When TON gas fee is enabled, set at least 0.01 TON.' });
+      return;
+    }
+    const gasFeeNanoton = String(Math.round(gasFeeTon * 1000000000));
+
+    const trimmedReceiver = String(req.body?.receiverTonAddress || '').trim();
+    if (gasFeeEnabled && (!trimmedReceiver || !isValidTonAddress(trimmedReceiver))) {
+      res.status(400).json({
+        error: 'Enter a valid receiving TON wallet address (starting with UQ or EQ) to collect gas fees.',
+      });
+      return;
+    }
+    if (trimmedReceiver && !isValidTonAddress(trimmedReceiver)) {
+      res.status(400).json({
+        error: 'Receiving TON wallet address format is invalid (must be a valid UQ/EQ TON address).',
+      });
+      return;
+    }
+
+    const allocationEnabled = Boolean(req.body?.allocationEnabled);
+    const requireFullChecklist = Boolean(req.body?.requireFullChecklist);
+    const now = Date.now();
+
+    await pool.query(
+      `INSERT INTO allocation_config (
+        id, allocation_enabled, points_per_coin_cents, tokens_per_point_milli, min_points_cents,
+        require_full_checklist, gas_fee_enabled, gas_fee_nanoton, receiver_ton_address, updated_at
+      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ON CONFLICT (id) DO UPDATE SET
+        allocation_enabled = EXCLUDED.allocation_enabled,
+        points_per_coin_cents = EXCLUDED.points_per_coin_cents,
+        tokens_per_point_milli = EXCLUDED.tokens_per_point_milli,
+        min_points_cents = EXCLUDED.min_points_cents,
+        require_full_checklist = EXCLUDED.require_full_checklist,
+        gas_fee_enabled = EXCLUDED.gas_fee_enabled,
+        gas_fee_nanoton = EXCLUDED.gas_fee_nanoton,
+        receiver_ton_address = EXCLUDED.receiver_ton_address,
+        updated_at = EXCLUDED.updated_at`,
+      [
+        allocationEnabled ? 1 : 0,
+        pointsPerCoinCents,
+        tokensPerPointMilli,
+        minPointsCents,
+        requireFullChecklist ? 1 : 0,
+        gasFeeEnabled ? 1 : 0,
+        gasFeeNanoton,
+        trimmedReceiver || null,
+        now,
+      ]
+    );
+
+    const allocationConfig = await getAllocationConfigFromExecutor(pool);
+    res.json({ allocationConfig });
+  } catch (err) {
+    res.status(err.status || 400).json({
+      error: err.message || 'Unable to save allocation configuration.',
+    });
+  }
+});
+
+app.get('/api/admin/allocation/export', async (req, res) => {
+  try {
+    verifyAdminRequest(req);
+    if (!pool) {
+      throw new Error('PostgreSQL DATABASE_URL is not configured on Render.');
+    }
+    const rawScope = typeof req.query.scope === 'string' ? req.query.scope : 'claimed';
+    const scope = rawScope === 'wallets' ? 'wallets' : rawScope === 'all' ? 'all' : 'claimed';
+    const config = await getAllocationConfigFromExecutor(pool);
+
+    const whereClause =
+      scope === 'claimed'
+        ? 'WHERE ac.user_id IS NOT NULL'
+        : scope === 'wallets'
+          ? 'WHERE wc.ton_address IS NOT NULL OR ac.ton_address IS NOT NULL'
+          : '';
+
+    const rowsRes = await pool.query(
+      `SELECT
+         u.telegram_id::TEXT AS telegram_id,
+         u.username,
+         u.first_name,
+         GREATEST(COALESCE(u.points_cents, 0), COALESCE(u.points, 0) * 100)::BIGINT AS effective_points_cents,
+         wc.ton_address,
+         ac.ton_address AS claim_ton_address,
+         ac.allocated_tokens_cents,
+         ac.gas_fee_nanoton,
+         ac.status AS claim_status,
+         ac.tx_hash,
+         ac.claimed_at
+       FROM users u
+       LEFT JOIN wallet_connections wc ON wc.user_id = u.telegram_id::TEXT
+       LEFT JOIN allocation_claims ac ON ac.user_id = u.telegram_id::TEXT
+       ${whereClause}
+       ORDER BY GREATEST(COALESCE(u.points_cents, 0), COALESCE(u.points, 0) * 100) DESC, u.telegram_id::TEXT ASC`
+    );
+
+    const header = [
+      'telegram_id',
+      'username',
+      'ton_address',
+      'points_balance',
+      'allocated_hert_tokens',
+      'gas_fee_ton',
+      'claim_status',
+      'tx_hash',
+      'claimed_at_utc',
+    ].join(',');
+
+    const lines = rowsRes.rows.map((r) => {
+      const ptsCents = Number(r.effective_points_cents || 0);
+      const resolvedWallet = r.claim_ton_address || r.ton_address || '';
+      const allocCents =
+        r.allocated_tokens_cents !== null && r.allocated_tokens_cents !== undefined
+          ? Number(r.allocated_tokens_cents)
+          : computeAllocatedTokensCents(ptsCents, config.pointsPerCoin);
+      const feeNano = r.gas_fee_nanoton ? Number(r.gas_fee_nanoton) : 0;
+      const statusLabel = r.claim_status
+        ? feeNano > 0
+          ? 'gas_paid_claimed'
+          : 'claimed'
+        : resolvedWallet
+          ? 'wallet_linked'
+          : 'unlinked';
+      const claimedIso = r.claimed_at ? new Date(Number(r.claimed_at)).toISOString() : '';
+
+      return [
+        escapeCsvCell(r.telegram_id),
+        escapeCsvCell(r.username ? `@${r.username}` : r.first_name || ''),
+        escapeCsvCell(resolvedWallet),
+        (ptsCents / 100).toFixed(2),
+        (allocCents / 100).toFixed(2),
+        (feeNano / 1000000000).toFixed(4),
+        escapeCsvCell(statusLabel),
+        escapeCsvCell(r.tx_hash || ''),
+        escapeCsvCell(claimedIso),
+      ].join(',');
+    });
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    res.json({
+      filename: `hert-allocation-${scope}-${dateTag}.csv`,
+      csv: [header, ...lines].join('\n'),
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      error: err.message || 'Unable to export allocation CSV.',
+    });
+  }
+});
+
+app.post('/api/admin/tasks/review', async (req, res) => {
+  try {
+    const caller = verifyAdminRequest(req);
+    if (!pool) {
+      throw new Error('PostgreSQL DATABASE_URL is not configured on Render.');
+    }
+
+    const cleanUserId = String(req.body?.userId || '').trim();
+    const cleanTaskId = String(req.body?.taskId || '').trim();
+    const action = req.body?.action === 'reject' ? 'reject' : 'approve';
+    const rejectReason =
+      typeof req.body?.rejectReason === 'string' ? req.body.rejectReason.trim() : '';
+
+    const task = TASK_CATALOG.find((t) => t.id === cleanTaskId);
+    if (!cleanUserId || !task) {
+      res.status(400).json({ error: 'Invalid user ID or task ID.' });
+      return;
+    }
+
+    const now = Date.now();
+    await withTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT status, approval_status FROM task_claims WHERE user_id = $1 AND task_id = $2 FOR UPDATE`,
+        [cleanUserId, task.id]
+      );
+      if (existing.rows.length === 0) {
+        throw new Error('Task verification record not found for this user.');
+      }
+      if (existing.rows[0].status === 'claimed') {
+        throw new Error('Duplicate prevented: this user already received the 35 HERT task reward.');
+      }
+
+      if (action === 'approve') {
+        await client.query(
+          `UPDATE task_claims
+           SET status = 'claimed',
+               approval_status = 'approved',
+               claimed_at = $1::BIGINT,
+               reviewed_at = $1::BIGINT,
+               reward_cents = $2::BIGINT,
+               reject_reason = NULL
+           WHERE user_id = $3 AND task_id = $4 AND status != 'claimed'`,
+          [now, task.rewardCents, cleanUserId, task.id]
+        );
+
+        await client.query(
+          `UPDATE users
+           SET points_cents = COALESCE(points_cents, 0) + $1::BIGINT,
+               points = FLOOR((COALESCE(points_cents, 0) + $1::BIGINT) / 100.0)::BIGINT,
+               updated_at = $2::BIGINT
+           WHERE telegram_id::TEXT = $3`,
+          [task.rewardCents, now, cleanUserId]
+        );
+
+        await client.query(
+          `INSERT INTO point_ledger (user_id, entry_type, amount_cents, description, created_at)
+           VALUES ($1, 'task_reward', $2::BIGINT, $3, $4::BIGINT)`,
+          [
+            cleanUserId,
+            task.rewardCents,
+            `Task verified: ${task.title} (+${(task.rewardCents / 100).toFixed(0)} HERT)`,
+            now,
+          ]
+        );
+      } else {
+        const reason =
+          rejectReason.slice(0, 160) ||
+          'Verification not found. Complete registration using the link and resubmit your exact username/ID.';
+        await client.query(
+          `UPDATE task_claims
+           SET approval_status = 'rejected',
+               reviewed_at = $1::BIGINT,
+               reject_reason = $2
+           WHERE user_id = $3 AND task_id = $4 AND status != 'claimed'`,
+          [now, reason, cleanUserId, task.id]
+        );
+      }
+    });
+
+    const dashboard = await getAdminDashboardPayload(caller, { limit: 50, offset: 0 });
+    res.json({
+      result: {
+        userId: cleanUserId,
+        taskId: task.id,
+        action,
+        rewardCents: action === 'approve' ? task.rewardCents : 0,
+      },
+      pendingTaskClaims: dashboard.pendingTaskClaims || [],
+      stats: dashboard.stats,
+    });
+  } catch (err) {
+    res.status(err.status || 400).json({
+      error: err.message || 'Unable to review task submission.',
+    });
+  }
+});
+
 // Telegram Bot Webhook Handler
 async function sendTelegramMessage(chatId, text, replyMarkup) {
   if (!BOT_TOKEN) return;
@@ -2055,6 +3005,41 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
   }).catch(() => {});
 }
 
+async function syncTelegramPlayMenuButton(chatId) {
+  if (!BOT_TOKEN) return;
+  const playUrl = PUBLIC_WEBAPP_URL.includes('?')
+    ? PUBLIC_WEBAPP_URL
+    : `${PUBLIC_WEBAPP_URL}/?v=5`;
+
+  if (typeof chatId === 'number' || typeof chatId === 'string') {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setChatMenuButton`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        menu_button: { type: 'default' },
+      }),
+    }).catch(() => {});
+  }
+
+  const body = {
+    menu_button: {
+      type: 'web_app',
+      text: 'Play',
+      web_app: { url: playUrl },
+    },
+  };
+  if (typeof chatId === 'number' || typeof chatId === 'string') {
+    body.chat_id = chatId;
+  }
+
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setChatMenuButton`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
 async function handleWebhook(req, res) {
   if (WEBHOOK_SECRET) {
     const incoming = req.header('x-telegram-bot-api-secret-token') || '';
@@ -2067,10 +3052,13 @@ async function handleWebhook(req, res) {
   res.status(200).json({ ok: true });
 
   const msg = req.body?.message;
-  if (!msg || !msg.from || msg.from.is_bot || !msg.text || !pool) return;
+  if (!msg || !msg.from || !pool || msg.from.is_bot || !msg.text) return;
 
   const text = String(msg.text).trim();
   const lower = text.toLowerCase();
+  const startMatch = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
+  const startPayload = startMatch && startMatch[1] ? startMatch[1].trim() : null;
+
   const tgUser = {
     telegramId: String(msg.from.id),
     username: msg.from.username || null,
@@ -2078,7 +3066,7 @@ async function handleWebhook(req, res) {
     lastName: msg.from.last_name || null,
     photoUrl: null,
     isPremium: Boolean(msg.from.is_premium),
-    startParam: text.startsWith('/start ') ? text.slice(7).trim() || null : null,
+    startParam: startPayload,
     verified: true,
   };
 
@@ -2091,16 +3079,22 @@ async function handleWebhook(req, res) {
   };
 
   try {
-    if (lower.startsWith('/start')) {
+    if (startMatch) {
+      await syncTelegramPlayMenuButton();
+      await syncTelegramPlayMenuButton(msg.chat.id);
       const state = await buildDashboardPayload(tgUser, PUBLIC_WEBAPP_URL);
+      const launchUrl = startPayload
+        ? `${PUBLIC_WEBAPP_URL}${PUBLIC_WEBAPP_URL.includes('?') ? '&' : '?'}ref=${encodeURIComponent(startPayload)}`
+        : `${PUBLIC_WEBAPP_URL}/?v=5`;
       const inlineMarkup = {
         inline_keyboard: [
-          [{ text: 'Launch HERT Mining App', web_app: { url: PUBLIC_WEBAPP_URL } }],
+          [{ text: 'Play HERT Mining', web_app: { url: launchUrl } }],
+          [{ text: 'Join Community', url: CHANNEL_URL }],
         ],
       };
       await sendTelegramMessage(
         msg.chat.id,
-        `<b>Welcome to HERT Mining, ${tgUser.firstName}!</b>\n\nBalance: <b>${(state.user.pointsCents / 100).toFixed(2)} HERT</b>\nInvite Code: <code>${state.referrals.referralCode}</code>\n\nTap below to open the HERT Mining Mini App:`,
+        `<b>Welcome to HERT Mining, ${tgUser.firstName}!</b>\n\nBalance: <b>${(state.user.pointsCents / 100).toFixed(2)} HERT</b>\nInvite Code: <code>${state.referrals.referralCode}</code>\nSuccessful Referrals: <b>${state.referrals.invitedCount}</b>\n\nTap below to open the HERT Mining Mini App:`,
         inlineMarkup
       );
       return;
@@ -2214,6 +3208,7 @@ app.all('/api/*', (_req, res) => {
 
 initDatabase()
   .then(() => {
+    void syncTelegramPlayMenuButton();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`HERT Mining server listening on port ${PORT}`);
     });
