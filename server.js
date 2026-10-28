@@ -68,10 +68,10 @@ const TASK_CATALOG = [
     id: 'join_interlink_labs',
     title: 'Join Interlink Labs',
     description:
-      'Join Interlink Labs via the official invite link, then return here to submit your username/ID for verification.',
+      'Join Interlink Labs via the official invite link, then return here and tap Claim Reward to earn +35 HERT.',
     category: 'social',
     platform: 'partner',
-    verificationMode: 'admin_approval',
+    verificationMode: 'auto_milestone',
     rewardCents: 3500,
     actionUrl: 'https://interlinklabs.ai/08067934296',
     targetTab: null,
@@ -81,10 +81,10 @@ const TASK_CATALOG = [
     id: 'join_verychat',
     title: 'Join Verychat',
     description:
-      'Join Verychat via the official invite link, then return here to submit your username/handle for verification.',
+      'Join Verychat via the official invite link, then return here and tap Claim Reward to earn +35 HERT.',
     category: 'social',
     platform: 'partner',
-    verificationMode: 'admin_approval',
+    verificationMode: 'auto_milestone',
     rewardCents: 3500,
     actionUrl: 'https://invite.verychat.io/0808abdool',
     targetTab: null,
@@ -94,10 +94,10 @@ const TASK_CATALOG = [
     id: 'join_gram_network',
     title: 'Join Gram Network',
     description:
-      'Launch Gram Network on Telegram via the official link, then return here to submit your Telegram/Gram username for verification.',
+      'Launch Gram Network on Telegram via the official link, then return here and tap Claim Reward to earn +35 HERT.',
     category: 'social',
     platform: 'partner',
-    verificationMode: 'admin_approval',
+    verificationMode: 'auto_milestone',
     rewardCents: 3500,
     actionUrl: 'https://telegram.me/Gramnetwork_bot?startapp=6701186910',
     targetTab: null,
@@ -1180,21 +1180,19 @@ async function buildDashboardPayload(tgUser, appOrigin) {
         };
       }
 
-      if (def.verificationMode === 'admin_approval') {
-        let itemStatus = 'available';
-        if (rec?.approval_status === 'pending_approval') {
-          itemStatus = 'pending_approval';
-        } else if (rec?.approval_status === 'rejected') {
-          itemStatus = 'rejected';
-        } else if (rec?.status === 'started') {
-          itemStatus = 'claimable';
-        }
+      if (def.platform === 'partner') {
+        const hasStartedRow = Boolean(rec && rec.status === 'started');
+        const startedAtMs = rec?.started_at ? Number(rec.started_at) : 0;
+        const waitRemainingSec =
+          hasStartedRow && startedAtMs > 0
+            ? Math.max(0, Math.ceil((5000 - (now - startedAtMs)) / 1000))
+            : 0;
         return {
           ...def,
-          status: itemStatus,
-          verifyWaitRemainingSeconds: 0,
-          proofSubmitted: rec?.proof_text || null,
-          rejectReason: rec?.reject_reason || null,
+          status: hasStartedRow ? 'claimable' : 'available',
+          verifyWaitRemainingSeconds: waitRemainingSec,
+          proofSubmitted: null,
+          rejectReason: null,
           claimedAt: null,
         };
       }
@@ -2233,66 +2231,109 @@ app.post('/api/tasks/start', async (req, res) => {
   }
 });
 
-async function submitPartnerTaskProofInTx(tgUser, task, rawProofText) {
-  const cleanProof = String(rawProofText || '').trim().replace(/\s+/g, ' ');
-  if (cleanProof.length < 2 || cleanProof.length > 160) {
-    throw new Error(
-      'Enter the valid username, handle, or account ID you registered with (2–160 characters).'
-    );
-  }
-
+async function claimPartnerTaskDirectInTx(tgUser, task, rawClientStartedAt) {
   const now = Date.now();
   const userIdStr = String(tgUser.telegramId);
+  const PARTNER_WAIT_MS = 5000;
+  const parsedClientStart = Number(rawClientStartedAt);
+  const validClientStart =
+    Number.isFinite(parsedClientStart) &&
+    parsedClientStart > 0 &&
+    parsedClientStart <= now &&
+    now - parsedClientStart <= 7 * 24 * 60 * 60 * 1000
+      ? Math.floor(parsedClientStart)
+      : null;
+
+  let waitSeconds = 0;
+
   await withTransaction(async (client) => {
     await ensureUserInTx(client, tgUser, now);
+
     const existing = await client.query(
-      `SELECT status, approval_status FROM task_claims WHERE user_id = $1 AND task_id = $2 FOR UPDATE`,
+      `SELECT status, started_at FROM task_claims WHERE user_id = $1 AND task_id = $2 FOR UPDATE`,
       [userIdStr, task.id]
     );
-    if (existing.rows.length === 0) {
-      await client.query(
-        `INSERT INTO task_claims (
-           user_id, task_id, status, started_at, reward_cents,
-           approval_status, proof_text, submitted_at, reject_reason
-         ) VALUES ($1, $2, 'started', $3::BIGINT, 0, 'pending_approval', $4, $3::BIGINT, NULL)`,
-        [userIdStr, task.id, now, cleanProof]
-      );
-      return;
-    }
-    if (existing.rows[0].status === 'claimed') {
+    if (existing.rows[0]?.status === 'claimed') {
       throw new Error('This one-time task reward has already been claimed.');
     }
-    if (existing.rows[0].approval_status === 'pending_approval') {
-      throw new Error('Your verification request is already pending admin approval.');
+
+    if (existing.rows.length === 0) {
+      if (validClientStart && now - validClientStart >= PARTNER_WAIT_MS) {
+        await client.query(
+          `INSERT INTO task_claims (
+             user_id, task_id, status, started_at, claimed_at, reward_cents, approval_status
+           ) VALUES ($1, $2, 'claimed', $3::BIGINT, $4::BIGINT, $5::BIGINT, 'approved')`,
+          [userIdStr, task.id, validClientStart, now, task.rewardCents]
+        );
+      } else {
+        const recordedStart = validClientStart || now;
+        await client.query(
+          `INSERT INTO task_claims (user_id, task_id, status, started_at, reward_cents)
+           VALUES ($1, $2, 'started', $3::BIGINT, 0)`,
+          [userIdStr, task.id, recordedStart]
+        );
+        waitSeconds = Math.max(1, Math.ceil((PARTNER_WAIT_MS - (now - recordedStart)) / 1000));
+        return;
+      }
+    } else {
+      const effectiveStart = Math.min(
+        Number(existing.rows[0].started_at || now),
+        validClientStart ?? now
+      );
+      const elapsed = now - effectiveStart;
+      if (elapsed < PARTNER_WAIT_MS) {
+        waitSeconds = Math.max(1, Math.ceil((PARTNER_WAIT_MS - elapsed) / 1000));
+        return;
+      }
+      await client.query(
+        `UPDATE task_claims
+         SET status = 'claimed',
+             approval_status = 'approved',
+             claimed_at = $1::BIGINT,
+             reward_cents = $2::BIGINT,
+             reject_reason = NULL
+         WHERE user_id = $3 AND task_id = $4`,
+        [now, task.rewardCents, userIdStr, task.id]
+      );
     }
 
     await client.query(
-      `UPDATE task_claims
-       SET approval_status = 'pending_approval',
-           proof_text = $1,
-           submitted_at = $2::BIGINT,
-           reject_reason = NULL
-       WHERE user_id = $3 AND task_id = $4 AND status != 'claimed'`,
-      [cleanProof, now, userIdStr, task.id]
+      `UPDATE users
+       SET points_cents = COALESCE(points_cents, 0) + $1::BIGINT,
+           points = FLOOR((COALESCE(points_cents, 0) + $1::BIGINT) / 100.0)::BIGINT,
+           updated_at = $2::BIGINT
+       WHERE telegram_id::TEXT = $3`,
+      [task.rewardCents, now, userIdStr]
+    );
+
+    await client.query(
+      `INSERT INTO point_ledger (user_id, entry_type, amount_cents, description, created_at)
+       VALUES ($1, 'task_reward', $2::BIGINT, $3, $4::BIGINT)`,
+      [userIdStr, task.rewardCents, `Task completed: ${task.title}`, now]
     );
   });
+
+  if (waitSeconds > 0) {
+    throw new Error(
+      `Complete joining ${task.title} via "${task.actionLabel}" first, then tap Claim Reward in ${waitSeconds}s.`
+    );
+  }
 }
 
 app.post('/api/tasks/submit-proof', async (req, res) => {
   try {
     const tgUser = resolveRequestUser(req);
     const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
-    const proofText = typeof req.body?.proofText === 'string' ? req.body.proofText : '';
     const task = TASK_CATALOG.find((t) => t.id === taskId);
-    if (!task || task.verificationMode !== 'admin_approval') {
-      throw new Error('Invalid partner verification task selected.');
+    if (!task || task.platform !== 'partner') {
+      throw new Error('Invalid partner task selected.');
     }
 
-    await submitPartnerTaskProofInTx(tgUser, task, proofText);
+    await claimPartnerTaskDirectInTx(tgUser, task, Date.now() - 10000);
     const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
-    res.json({ status: 'pending_approval', title: task.title, payload });
+    res.json({ status: 'claimed', rewardCents: task.rewardCents, title: task.title, payload });
   } catch (err) {
-    res.status(400).json({ error: err.message || 'Unable to submit task verification.' });
+    res.status(400).json({ error: err.message || 'Unable to claim task bonus.' });
   }
 });
 
@@ -2300,20 +2341,19 @@ app.post('/api/tasks/claim', async (req, res) => {
   try {
     const tgUser = resolveRequestUser(req);
     const taskId = typeof req.body?.taskId === 'string' ? req.body.taskId : '';
-    const proofText = typeof req.body?.proofText === 'string' ? req.body.proofText : '';
+    const clientStartedAt = req.body?.clientStartedAt;
     const task = TASK_CATALOG.find((t) => t.id === taskId);
     if (!task) throw new Error('Task not found.');
 
-    // Partner tasks require real verification / admin approval — clicking a link is never enough
-    if (task.verificationMode === 'admin_approval') {
-      if (!proofText.trim()) {
-        throw new Error(
-          `Clicking the link alone is not proof of completion. Enter the username or ID you joined ${task.title} with to submit for verification.`
-        );
-      }
-      await submitPartnerTaskProofInTx(tgUser, task, proofText);
+    if (task.platform === 'partner') {
+      await claimPartnerTaskDirectInTx(tgUser, task, clientStartedAt);
       const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
-      res.json({ rewardCents: 0, title: task.title, pendingApproval: true, payload });
+      res.json({
+        rewardCents: task.rewardCents,
+        title: task.title,
+        pendingApproval: false,
+        payload,
+      });
       return;
     }
 
