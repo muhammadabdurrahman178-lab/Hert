@@ -2,6 +2,8 @@
 
 const crypto = require('crypto');
 const dns = require('dns');
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const { Pool } = require('pg');
 
@@ -2077,73 +2079,176 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '32kb' }));
 
-app.get('/', (req, res) => {
-  const configuredWeb = cleanEnv(process.env.PUBLIC_WEBAPP_URL || process.env.WEBAPP_URL).replace(
-    /\/+$/,
-    ''
-  );
-  const host = (req.header('x-forwarded-host') || req.header('host') || '').split(',')[0].trim();
-  const selfOrigin = host ? `https://${host}` : PUBLIC_WEBAPP_URL;
-  const targetBase =
-    configuredWeb &&
-    configuredWeb.startsWith('https://') &&
-    !/\.(run\.app|ai\.studio)$/i.test(configuredWeb) &&
-    configuredWeb !== selfOrigin
-      ? configuredWeb
-      : selfOrigin;
+const UPSTREAM_WEB_APP_ORIGIN = cleanEnv(
+  process.env.UPSTREAM_WEB_APP_ORIGIN || 'https://hert-mining.ai.studio'
+).replace(/\/+$/, '');
 
-  const qs = new URLSearchParams();
-  for (const [k, v] of Object.entries(req.query || {})) {
-    if (k === 'openChrome') continue;
-    if (typeof v === 'string' && v.trim()) qs.set(k, v.trim());
-  }
-  const suffix = qs.toString() ? `/?${qs.toString()}` : '/';
-  const finalHttpsUrl = `${targetBase}${suffix}`;
-  const hostAndPath = finalHttpsUrl.replace(/^https?:\/\//i, '');
-  const androidIntent = `intent://${hostAndPath}#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=${encodeURIComponent(finalHttpsUrl)};end`;
+const LOCAL_DIST_CANDIDATES = [
+  path.join(__dirname, 'dist'),
+  path.join(__dirname, '..', 'dist'),
+];
+const LOCAL_DIST_DIR = LOCAL_DIST_CANDIDATES.find((dir) =>
+  fs.existsSync(path.join(dir, 'index.html'))
+);
 
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.status(200).send(`<!doctype html>
+if (LOCAL_DIST_DIR) {
+  app.use(express.static(LOCAL_DIST_DIR, { index: false, maxAge: '1h' }));
+}
+
+const upstreamStaticCache = new Map();
+const MAX_STATIC_CACHE_ITEMS = 80;
+
+function renderSafeFallbackGatewayHtml(finalHttpsUrl) {
+  const safeJsonUrl = JSON.stringify(finalHttpsUrl);
+  const escapedDisplay = finalHttpsUrl
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HERT Network — Open in Google Chrome</title>
+  <title>HERT Network — Official Web Platform</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #070A09; color: #F3F5F4; font-family: system-ui, -apple-system, sans-serif; padding: 20px; }
     .card { width: 100%; max-width: 460px; background: #0D1210; border: 1px solid rgba(255,255,255,0.09); border-radius: 20px; padding: 28px 24px; text-align: center; }
     h1 { margin: 0 0 10px; font-size: 22px; color: #F3F5F4; }
     p { margin: 0 0 22px; font-size: 14px; line-height: 1.55; color: #9AA8A1; }
-    a.primary { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 52px; border-radius: 14px; background: #D4AF37; color: #050706; font-weight: 700; font-size: 15px; text-decoration: none; margin-bottom: 12px; }
+    button.primary { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 52px; border-radius: 14px; background: #D4AF37; color: #050706; border: none; font-weight: 700; font-size: 15px; cursor: pointer; margin-bottom: 12px; }
     button.copy { width: 100%; min-height: 46px; border-radius: 14px; background: #141C19; color: #D6DFDA; border: 1px solid rgba(255,255,255,0.1); font-weight: 600; font-size: 13px; cursor: pointer; }
+    .guide { display: none; margin: 0 0 12px; padding: 12px 14px; border-radius: 12px; background: #17130A; border: 1px solid rgba(212,175,55,0.45); color: #F6E2A8; font-size: 12px; line-height: 1.5; text-align: left; }
     .url { margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: #070A09; font-family: ui-monospace, monospace; font-size: 12px; color: #8E9D96; word-break: break-all; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>HERT Network Web</h1>
-    <p>Tap the button below to open HERT Mining directly in <strong>Google Chrome</strong>.</p>
-    <a id="chromeBtn" class="primary" href="${androidIntent}">Open in Google Chrome</a>
-    <button class="copy" type="button" onclick="navigator.clipboard && navigator.clipboard.writeText('${finalHttpsUrl.replace(/'/g, "\\'")}').then(()=>{this.textContent='Website Link Copied!'})">Copy Website Link</button>
-    <div class="url">${finalHttpsUrl.replace(/</g, '&lt;')}</div>
+    <p>Tap below to launch HERT Mining in <strong>Google Chrome</strong>.</p>
+    <button id="chromeBtn" class="primary" type="button">Open in Google Chrome</button>
+    <div id="menuGuide" class="guide">Idan Chrome bai buɗe da kansa ba: Danna dige uku (<strong>⋮</strong>) a sama gefen dama → zaɓi <strong>Open in Chrome</strong> (An riga an kwafi link ɗin!).</div>
+    <button id="copyBtn" class="copy" type="button">Copy Website Link</button>
+    <div class="url">${escapedDisplay}</div>
   </div>
   <script>
     (function(){
-      var ua = navigator.userAgent || '';
+      var target = ${safeJsonUrl};
       var btn = document.getElementById('chromeBtn');
-      var target = ${JSON.stringify(finalHttpsUrl)};
-      var hostPath = target.replace(/^https?:\\/\\//i, '');
-      if (/iPhone|iPad|iPod/i.test(ua)) {
-        btn.href = 'googlechrome://' + hostPath;
-      } else if (!/Android/i.test(ua)) {
-        btn.href = target;
+      var copyBtn = document.getElementById('copyBtn');
+      var guide = document.getElementById('menuGuide');
+      function copyUrl() {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(target).then(function(){ copyBtn.textContent = 'Website Link Copied!'; }).catch(function(){});
+        }
       }
+      copyBtn.addEventListener('click', copyUrl);
+      btn.addEventListener('click', function(){
+        copyUrl();
+        guide.style.display = 'block';
+        try {
+          if (window.Telegram && window.Telegram.WebApp && typeof window.Telegram.WebApp.openLink === 'function') {
+            window.Telegram.WebApp.openLink(target, { try_instant_view: false });
+            return;
+          }
+          if (window.TelegramWebviewProxy && typeof window.TelegramWebviewProxy.postEvent === 'function') {
+            window.TelegramWebviewProxy.postEvent('web_app_open_link', JSON.stringify({ url: target, try_instant_view: false }));
+            return;
+          }
+        } catch (e) {}
+        window.open(target, '_blank', 'noopener,noreferrer');
+      });
     })();
   </script>
 </body>
-</html>`);
-});
+</html>`;
+}
+
+async function serveWebFrontendRequest(req, res) {
+  const reqPath = req.path || '/';
+  const isAssetFile =
+    reqPath.startsWith('/assets/') ||
+    /\.(js|mjs|css|png|jpg|jpeg|svg|webp|ico|woff2?|ttf|json|html)$/i.test(reqPath);
+
+  if (LOCAL_DIST_DIR) {
+    const targetFile = isAssetFile
+      ? path.join(LOCAL_DIST_DIR, reqPath.replace(/^\/+/, ''))
+      : path.join(LOCAL_DIST_DIR, 'index.html');
+    if (fs.existsSync(targetFile) && fs.statSync(targetFile).isFile()) {
+      res.sendFile(targetFile);
+      return;
+    }
+  }
+
+  const upstreamPath = isAssetFile ? reqPath : '/';
+  const now = Date.now();
+  const cached = upstreamStaticCache.get(upstreamPath);
+  const ttlMs = reqPath.startsWith('/assets/') ? 6 * 60 * 60 * 1000 : 30 * 1000;
+
+  if (cached && now - cached.fetchedAt < ttlMs) {
+    res.setHeader('Content-Type', cached.contentType);
+    if (reqPath.startsWith('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+    res.status(200).send(cached.body);
+    return;
+  }
+
+  try {
+    const upstreamRes = await fetch(`${UPSTREAM_WEB_APP_ORIGIN}${upstreamPath}`, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (upstreamRes.ok) {
+      const contentType =
+        upstreamRes.headers.get('content-type') ||
+        (isAssetFile ? 'application/octet-stream' : 'text/html; charset=utf-8');
+      const arrayBuf = await upstreamRes.arrayBuffer();
+      const bodyBuf = Buffer.from(arrayBuf);
+
+      if (bodyBuf.length < 4 * 1024 * 1024) {
+        if (upstreamStaticCache.size >= MAX_STATIC_CACHE_ITEMS) {
+          const oldestKey = upstreamStaticCache.keys().next().value;
+          if (oldestKey) upstreamStaticCache.delete(oldestKey);
+        }
+        upstreamStaticCache.set(upstreamPath, {
+          body: bodyBuf,
+          contentType,
+          fetchedAt: now,
+        });
+      }
+
+      res.setHeader('Content-Type', contentType);
+      if (reqPath.startsWith('/assets/')) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+      res.status(200).send(bodyBuf);
+      return;
+    }
+  } catch {
+    if (cached) {
+      res.setHeader('Content-Type', cached.contentType);
+      res.status(200).send(cached.body);
+      return;
+    }
+  }
+
+  if (isAssetFile) {
+    res.status(404).end();
+    return;
+  }
+
+  const selfOrigin = resolveAppOrigin(req);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(renderSafeFallbackGatewayHtml(selfOrigin));
+}
 
 const handleHealth = async (_req, res) => {
   if (!pool) {
@@ -2161,6 +2266,9 @@ const handleHealth = async (_req, res) => {
 app.get('/health', handleHealth);
 app.get('/api/health', handleHealth);
 app.get('/healthz', handleHealth);
+app.get('/api/web-ui-ready', (req, res) => {
+  res.status(200).json({ ok: true, webUi: true, origin: resolveAppOrigin(req), timestamp: Date.now() });
+});
 
 app.get('/tonconnect-manifest.json', (req, res) => {
   const origin = PUBLIC_WEBAPP_URL || resolveAppOrigin(req);
@@ -4496,6 +4604,10 @@ app.post('/api/telegram/webhook', handleWebhook);
 
 app.all('/api/*', (_req, res) => {
   res.status(404).json({ error: 'API endpoint not found.' });
+});
+
+app.get('*', (req, res) => {
+  void serveWebFrontendRequest(req, res);
 });
 
 initDatabase()
