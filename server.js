@@ -21,16 +21,19 @@ const MINI_APP_SHORT_NAME = cleanEnv(process.env.TELEGRAM_MINI_APP_SHORT_NAME).r
   ''
 );
 const WEBHOOK_SECRET = cleanEnv(process.env.TELEGRAM_WEBHOOK_SECRET);
+const RENDER_EXTERNAL_URL = cleanEnv(process.env.RENDER_EXTERNAL_URL).replace(/\/+$/, '');
 const RAW_PUBLIC_WEBAPP_URL = cleanEnv(
-  process.env.PUBLIC_WEBAPP_URL || process.env.WEBAPP_URL || 'https://hert-mining.ai.studio'
+  process.env.PUBLIC_WEBAPP_URL ||
+    process.env.WEBAPP_URL ||
+    RENDER_EXTERNAL_URL ||
+    'https://hert-mining-backend.onrender.com'
 ).replace(/\/+$/, '');
 const PUBLIC_WEBAPP_URL =
   RAW_PUBLIC_WEBAPP_URL.startsWith('https://') &&
   !/^https:\/\/ais-(dev|pre)-/i.test(RAW_PUBLIC_WEBAPP_URL) &&
-  !/\.run\.app$/i.test(RAW_PUBLIC_WEBAPP_URL)
+  !/\.(run\.app|ai\.studio)$/i.test(RAW_PUBLIC_WEBAPP_URL)
     ? RAW_PUBLIC_WEBAPP_URL
-    : 'https://hert-mining.ai.studio';
-const RENDER_EXTERNAL_URL = cleanEnv(process.env.RENDER_EXTERNAL_URL).replace(/\/+$/, '');
+    : RENDER_EXTERNAL_URL || 'https://hert-mining-backend.onrender.com';
 const CHANNEL_ID = cleanEnv(process.env.HERT_TELEGRAM_CHANNEL_ID || '@hertchannels');
 const CHANNEL_URL = cleanEnv(process.env.HERT_TELEGRAM_CHANNEL_URL || 'https://t.me/hertchannels');
 const BOOST_URL = cleanEnv(
@@ -105,15 +108,16 @@ const TASK_CATALOG = [
   },
   {
     id: 'join_tg_channel',
-    title: 'Join Official HERT Channel (@hertchannels)',
-    description: 'Subscribe to @hertchannels on Telegram for verified ecosystem & TGE updates.',
+    title: 'Follow Official HERT Community',
+    description:
+      'Visit and follow the official HERT community channel for ecosystem & token updates, then return here to claim +30 HERT.',
     category: 'social',
-    platform: 'telegram',
-    verificationMode: 'telegram_api',
+    platform: 'partner',
+    verificationMode: 'auto_milestone',
     rewardCents: 3000,
     actionUrl: CHANNEL_URL,
     targetTab: null,
-    actionLabel: 'Join Channel',
+    actionLabel: 'Join Now',
   },
   {
     id: 'link_ton_wallet',
@@ -312,9 +316,10 @@ function extractReferralTarget(raw) {
       const normalizedUrl = cleaned.startsWith('http') ? cleaned : `https://${cleaned}`;
       const u = new URL(normalizedUrl);
       const param =
+        u.searchParams.get('start') ||
         u.searchParams.get('startapp') ||
         u.searchParams.get('ref') ||
-        u.searchParams.get('start') ||
+        u.searchParams.get('tgWebAppStartParam') ||
         '';
       if (param) cleaned = param.trim();
     }
@@ -322,31 +327,64 @@ function extractReferralTarget(raw) {
     // ignore URL parse errors
   }
 
-  cleaned = cleaned.replace(/^ref_/i, '').trim();
+  cleaned = cleaned.replace(/^ref[-_]/i, '').trim();
   if (!cleaned) return null;
 
-  if (/^\d{4,20}$/.test(cleaned)) {
-    return { referralCode: generateReferralCode(cleaned), numericTelegramId: cleaned };
+  const upper = cleaned.toUpperCase();
+
+  // Explicit HERT-XXXXXX code (including 6-digit hex digests like HERT-193847)
+  if (upper.startsWith('HERT-') && /^HERT-[A-Z0-9]{4,12}$/.test(upper)) {
+    return { referralCode: upper, numericTelegramId: null };
   }
 
-  const upper = cleaned.toUpperCase();
-  const normalizedCode = upper.startsWith('HERT-') ? upper : `HERT-${upper}`;
-  if (/^HERT-[A-Z0-9]{4,12}$/.test(normalizedCode)) {
-    return { referralCode: normalizedCode, numericTelegramId: null };
+  // 7–20 digit positive Telegram user ID
+  if (/^\d{7,20}$/.test(upper)) {
+    return { referralCode: null, numericTelegramId: upper };
   }
+
+  // 4–12 character alphanumeric code without HERT- prefix (check referral_code first, then numeric ID if digits)
+  if (/^[A-Z0-9]{4,12}$/.test(upper)) {
+    return {
+      referralCode: `HERT-${upper}`,
+      numericTelegramId: /^\d{5,12}$/.test(upper) ? upper : null,
+    };
+  }
+
+  return null;
+}
+
+function normalizeReferralParam(raw) {
+  const target = extractReferralTarget(raw);
+  if (!target) return null;
+  if (target.referralCode) return target.referralCode;
+  if (target.numericTelegramId) return `ref_${target.numericTelegramId}`;
   return null;
 }
 
 function verifyTelegramInitData(initDataRaw, botToken) {
   const params = new URLSearchParams(initDataRaw);
   const receivedHash = params.get('hash');
-  if (!receivedHash) throw new Error('Missing hash in Telegram initData.');
+  if (!receivedHash || !/^[0-9a-f]{64}$/i.test(receivedHash)) {
+    throw new Error('Missing or malformed hash in Telegram initData.');
+  }
+
+  const authDate = Number(params.get('auth_date') || '0');
+  if (!Number.isFinite(authDate) || authDate <= 0) {
+    throw new Error('Missing or invalid auth_date in Telegram initData.');
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (nowSec - authDate > 86400) {
+    throw new Error('Telegram session expired. Please reopen HERT Mining from Telegram.');
+  }
+  if (authDate > nowSec + 300) {
+    throw new Error('Invalid future auth_date in Telegram initData.');
+  }
 
   const pairs = [];
   params.forEach((value, key) => {
     if (key !== 'hash') pairs.push(`${key}=${value}`);
   });
-  pairs.sort();
+  pairs.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
   const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
   const calculatedHash = crypto.createHmac('sha256', secretKey).update(pairs.join('\n')).digest('hex');
@@ -354,13 +392,7 @@ function verifyTelegramInitData(initDataRaw, botToken) {
   const a = Buffer.from(calculatedHash.toLowerCase(), 'hex');
   const b = Buffer.from(receivedHash.toLowerCase(), 'hex');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    throw new Error('Invalid Telegram initData signature.');
-  }
-
-  const authDate = Number(params.get('auth_date') || '0');
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (authDate > 0 && nowSec - authDate > 7 * 86400) {
-    throw new Error('Telegram session expired. Please reopen HERT Mining from Telegram.');
+    throw new Error('Invalid Telegram initData cryptographic signature.');
   }
 
   const userJson = params.get('user');
@@ -380,6 +412,197 @@ function verifyTelegramInitData(initDataRaw, botToken) {
   };
 }
 
+const WEB_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function deriveWebSigningKey() {
+  const seed = [
+    cleanEnv(process.env.WEB_AUTH_SECRET),
+    getConfiguredAdminSecret(),
+    BOT_TOKEN,
+    DATABASE_URL,
+    'hert-web-fallback-seed',
+  ]
+    .filter(Boolean)
+    .join(':');
+  return crypto.createHmac('sha256', 'hert-web-session-signing-key-v1').update(seed).digest();
+}
+
+function normalizeWebIdentifier(raw) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, '');
+}
+
+function derivePublicUsername(identifier) {
+  const clean = normalizeWebIdentifier(identifier);
+  const base = clean.includes('@') ? clean.split('@')[0] : clean;
+  const sanitized = base.replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  return (sanitized || 'miner').slice(0, 32);
+}
+
+function deriveWebAccountId(normalizedIdentifier) {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`hert-web-account-v1:${normalizedIdentifier}`)
+    .digest();
+  const raw48 = digest.readUIntBE(0, 6);
+  const suffix14 = raw48 % 100000000000000;
+  return `8${String(suffix14).padStart(14, '0')}`;
+}
+
+function hashWebPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derived}`;
+}
+
+function verifyWebPassword(password, storedHash) {
+  if (!password || !storedHash) return false;
+  const parts = String(storedHash).split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const [, salt, expectedHex] = parts;
+  if (!salt || !/^[0-9a-f]{128}$/i.test(expectedHex)) return false;
+  try {
+    const computed = crypto.scryptSync(password, salt, 64);
+    const expected = Buffer.from(expectedHex, 'hex');
+    if (computed.length !== expected.length) return false;
+    return crypto.timingSafeEqual(computed, expected);
+  } catch {
+    return false;
+  }
+}
+
+function issueWebSessionToken(claims) {
+  const now = Date.now();
+  const expiresAt = now + WEB_SESSION_TTL_MS;
+  const fullClaims = {
+    accountId: String(claims.accountId),
+    identifier: normalizeWebIdentifier(claims.identifier),
+    firstName: String(claims.firstName || 'Miner').slice(0, 64),
+    lastName: claims.lastName ? String(claims.lastName).slice(0, 64) : null,
+    username: claims.username ? String(claims.username).slice(0, 32) : null,
+    issuedAt: now,
+    expiresAt,
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(fullClaims), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', deriveWebSigningKey())
+    .update(encodedPayload)
+    .digest('base64url');
+  return { token: `hert_web.${encodedPayload}.${sig}`, expiresAt };
+}
+
+function verifyWebSessionToken(rawToken) {
+  if (!rawToken) return null;
+  let token = String(rawToken).trim();
+  if (token.toLowerCase().startsWith('bearer ')) token = token.slice(7).trim();
+  if (!token.startsWith('hert_web.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, encodedPayload, receivedSig] = parts;
+  if (!encodedPayload || !receivedSig) return null;
+
+  const expectedSig = crypto
+    .createHmac('sha256', deriveWebSigningKey())
+    .update(encodedPayload)
+    .digest('base64url');
+
+  const a = Buffer.from(receivedSig, 'utf8');
+  const b = Buffer.from(expectedSig, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    if (
+      !parsed ||
+      typeof parsed.accountId !== 'string' ||
+      !/^\d+$/.test(parsed.accountId) ||
+      typeof parsed.expiresAt !== 'number' ||
+      parsed.expiresAt <= Date.now()
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+const MIGRATION_TOKEN_TTL_MS = 30 * 60 * 1000;
+
+function deriveMigrationSigningKey() {
+  if (BOT_TOKEN && BOT_TOKEN.length >= 20) {
+    return crypto.createHmac('sha256', 'hert-telegram-migration-v1').update(BOT_TOKEN).digest();
+  }
+  return deriveWebSigningKey();
+}
+
+function issueTelegramMigrationToken(user) {
+  const now = Date.now();
+  const expiresAt = now + MIGRATION_TOKEN_TTL_MS;
+  const payloadObj = {
+    telegramId: String(user.telegramId).trim(),
+    firstName: String(user.firstName || 'Miner').slice(0, 64),
+    lastName: user.lastName ? String(user.lastName).slice(0, 64) : null,
+    username: user.username ? String(user.username).slice(0, 32) : null,
+    issuedAt: now,
+    expiresAt,
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(payloadObj), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', deriveMigrationSigningKey())
+    .update(encodedPayload)
+    .digest('base64url');
+  return { token: `hert_mig.${encodedPayload}.${sig}`, expiresAt };
+}
+
+function verifyTelegramMigrationToken(rawInput) {
+  if (!rawInput) return null;
+  let token = String(rawInput).trim();
+  if (/^https?:\/\//i.test(token) || token.includes('migrate=')) {
+    try {
+      const normalized = token.startsWith('http')
+        ? token
+        : `https://hert.local/?${token.replace(/^\?/, '')}`;
+      const u = new URL(normalized);
+      const extracted = u.searchParams.get('migrate');
+      if (extracted) token = extracted.trim();
+    } catch {
+      // keep raw string
+    }
+  }
+  if (!token.startsWith('hert_mig.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, encodedPayload, receivedSig] = parts;
+  if (!encodedPayload || !receivedSig) return null;
+
+  const expectedSig = crypto
+    .createHmac('sha256', deriveMigrationSigningKey())
+    .update(encodedPayload)
+    .digest('base64url');
+  const a = Buffer.from(receivedSig, 'utf8');
+  const b = Buffer.from(expectedSig, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+    if (
+      !parsed ||
+      typeof parsed.telegramId !== 'string' ||
+      !/^-?\d+$/.test(parsed.telegramId) ||
+      typeof parsed.expiresAt !== 'number' ||
+      parsed.expiresAt <= Date.now()
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function resolveRequestUser(req) {
   const authHeader = cleanEnv(req.header('authorization'));
   const tmaInitData = authHeader.toLowerCase().startsWith('tma ')
@@ -395,6 +618,27 @@ function resolveRequestUser(req) {
   const bodyRef = typeof req.body?.startParam === 'string' ? req.body.startParam.trim() : '';
   const fallbackStartParam =
     (req.header('x-start-param') || '').trim() || queryRef || bodyRef || null;
+
+  const webBearer = authHeader.toLowerCase().startsWith('bearer ')
+    ? authHeader.slice(7).trim()
+    : cleanEnv(req.header('x-web-session'));
+  if (webBearer) {
+    const webClaims = verifyWebSessionToken(webBearer);
+    if (!webClaims) {
+      throw new Error('Your web session has expired. Please sign in again.');
+    }
+    return {
+      telegramId: String(webClaims.accountId),
+      username: webClaims.username || null,
+      firstName: webClaims.firstName || 'Miner',
+      lastName: webClaims.lastName || null,
+      photoUrl: null,
+      isPremium: false,
+      startParam: fallbackStartParam,
+      verified: true,
+      authMode: 'web_authenticated',
+    };
+  }
 
   if (initDataRaw && BOT_TOKEN) {
     const user = verifyTelegramInitData(initDataRaw, BOT_TOKEN);
@@ -422,9 +666,7 @@ function resolveRequestUser(req) {
     }
   }
 
-  throw new Error(
-    'Telegram authentication required. Please open HERT Mining directly inside Telegram (@HERTCoinBot).'
-  );
+  throw new Error('Authentication required. Please sign in or create your HERT Mining web account.');
 }
 
 async function initDatabase() {
@@ -611,6 +853,35 @@ async function initDatabase() {
       status TEXT NOT NULL DEFAULT 'claimed',
       claimed_at BIGINT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS pending_referrals (
+      telegram_id TEXT PRIMARY KEY,
+      referral_code TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS web_accounts (
+      account_id TEXT PRIMARY KEY,
+      identifier TEXT NOT NULL UNIQUE,
+      email TEXT,
+      username TEXT,
+      first_name TEXT NOT NULL,
+      last_name TEXT,
+      password_hash TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      last_login_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS web_migration_codes (
+      code TEXT PRIMARY KEY,
+      telegram_id TEXT NOT NULL,
+      first_name TEXT NOT NULL,
+      last_name TEXT,
+      username TEXT,
+      created_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
   `);
 
   await pool.query(`
@@ -743,6 +1014,14 @@ function computeSessionState(row, now) {
 async function applyReferralInTx(client, inviteeId, rawInput, now, options = {}) {
   const isNewlyRegistered = Boolean(options.isNewlyRegistered);
   const manualEntry = Boolean(options.manualEntry);
+  const isVerifiedSession = options.verified !== false;
+
+  if (BOT_TOKEN && !isVerifiedSession) {
+    return {
+      applied: false,
+      reason: 'Verified Telegram Mini App session required to claim referral rewards.',
+    };
+  }
 
   const target = extractReferralTarget(rawInput);
   if (!target) return { applied: false, reason: 'Invalid referral code format.' };
@@ -766,13 +1045,14 @@ async function applyReferralInTx(client, inviteeId, rawInput, now, options = {})
   }
 
   const createdMs = Number(invitee.created_ms || now);
-  const isFreshAccount =
-    now - createdMs <= MANUAL_REFERRAL_NEW_USER_WINDOW_MS &&
+  const maxFreshAgeMs = manualEntry ? MANUAL_REFERRAL_NEW_USER_WINDOW_MS : 60 * 1000;
+  const isZeroActivityFresh =
+    now - createdMs <= maxFreshAgeMs &&
     Number(invitee.completed_cycles || 0) === 0 &&
     Number(invitee.total_mined_cents || 0) === 0 &&
     !invitee.last_checkin_at;
 
-  if (!isNewlyRegistered && !isFreshAccount) {
+  if (!isNewlyRegistered && !isZeroActivityFresh) {
     return {
       applied: false,
       reason: manualEntry
@@ -781,22 +1061,24 @@ async function applyReferralInTx(client, inviteeId, rawInput, now, options = {})
     };
   }
 
-  let inviterRes;
-  if (target.numericTelegramId) {
-    inviterRes = await client.query(
-      `SELECT telegram_id::TEXT AS tid, first_name, referred_by::TEXT AS referred_by
-       FROM users WHERE telegram_id::TEXT = $1`,
-      [target.numericTelegramId]
-    );
-  } else {
-    inviterRes = await client.query(
-      `SELECT telegram_id::TEXT AS tid, first_name, referred_by::TEXT AS referred_by
-       FROM users WHERE UPPER(referral_code) = UPPER($1)`,
+  let inviter = null;
+  if (target.referralCode) {
+    const byCodeRes = await client.query(
+      `SELECT telegram_id::TEXT AS tid, first_name, referred_by::TEXT AS referred_by, referral_code
+       FROM users WHERE UPPER(referral_code) = UPPER($1) LIMIT 1`,
       [target.referralCode]
     );
+    inviter = byCodeRes.rows[0] || null;
+  }
+  if (!inviter && target.numericTelegramId) {
+    const byTidRes = await client.query(
+      `SELECT telegram_id::TEXT AS tid, first_name, referred_by::TEXT AS referred_by, referral_code
+       FROM users WHERE telegram_id::TEXT = $1 LIMIT 1`,
+      [target.numericTelegramId]
+    );
+    inviter = byTidRes.rows[0] || null;
   }
 
-  const inviter = inviterRes.rows[0];
   if (!inviter) return { applied: false, reason: 'Referral code not found.' };
   if (String(inviter.tid) === String(inviteeId)) {
     return { applied: false, reason: 'Self-referrals are not allowed.' };
@@ -886,16 +1168,27 @@ async function ensureUserInTx(client, tgUser, now) {
     `SELECT telegram_id::TEXT AS tid, referral_code, first_name FROM users WHERE telegram_id::TEXT = $1`,
     [tgUser.telegramId]
   );
-  const isNewlyRegistered = existingRes.rows.length === 0;
-  const referralCode = existingRes.rows[0]?.referral_code || generateReferralCode(tgUser.telegramId);
 
-  if (isNewlyRegistered) {
-    await client.query(
+  let isNewlyRegistered = false;
+  let referralCode = existingRes.rows[0]?.referral_code || generateReferralCode(tgUser.telegramId);
+
+  if (existingRes.rows.length === 0) {
+    const codeCheck = await client.query(
+      `SELECT 1 FROM users WHERE UPPER(referral_code) = UPPER($1) LIMIT 1`,
+      [referralCode]
+    );
+    if (codeCheck.rows.length > 0) {
+      referralCode = `HERT-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    }
+
+    const inserted = await client.query(
       `INSERT INTO users (
         telegram_id, username, first_name, last_name, photo_url, is_premium,
         referral_code, points, points_cents, total_mined_cents, completed_cycles,
         checkin_streak, created_at, created_at_ms, updated_at
-      ) VALUES ($1::BIGINT, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, 0, NOW(), $8, $8)`,
+      ) VALUES ($1::BIGINT, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, 0, NOW(), $8, $8)
+      ON CONFLICT (telegram_id) DO NOTHING
+      RETURNING telegram_id::TEXT AS tid`,
       [
         tgUser.telegramId,
         tgUser.username,
@@ -907,6 +1200,7 @@ async function ensureUserInTx(client, tgUser, now) {
         now,
       ]
     );
+    isNewlyRegistered = inserted.rows.length > 0;
   } else {
     await client.query(
       `UPDATE users
@@ -964,10 +1258,26 @@ async function ensureUserInTx(client, tgUser, now) {
     }
   }
 
-  if (tgUser.startParam) {
-    await applyReferralInTx(client, tgUser.telegramId, tgUser.startParam, now, {
+  // Resolve incoming startParam or staged /start pending_referrals record
+  let effectiveStartParam = tgUser.startParam || null;
+  const pendingRes = await client.query(
+    `SELECT referral_code, expires_at FROM pending_referrals WHERE telegram_id = $1 LIMIT 1`,
+    [String(tgUser.telegramId)]
+  );
+  if (pendingRes.rows.length > 0) {
+    if (!effectiveStartParam && Number(pendingRes.rows[0].expires_at) >= now) {
+      effectiveStartParam = pendingRes.rows[0].referral_code;
+    }
+    await client.query(`DELETE FROM pending_referrals WHERE telegram_id = $1`, [
+      String(tgUser.telegramId),
+    ]);
+  }
+
+  if (effectiveStartParam) {
+    await applyReferralInTx(client, tgUser.telegramId, effectiveStartParam, now, {
       isNewlyRegistered,
       manualEntry: false,
+      verified: tgUser.verified,
     });
   }
 }
@@ -1123,12 +1433,7 @@ async function buildDashboardPayload(tgUser, appOrigin) {
     );
 
     const referralCode = userRow.referral_code || generateReferralCode(tgUser.telegramId);
-    const startAppPayload = `ref_${referralCode.replace('HERT-', '')}`;
-    const telegramDeepLink = BOT_USERNAME
-      ? MINI_APP_SHORT_NAME
-        ? `https://t.me/${BOT_USERNAME}/${MINI_APP_SHORT_NAME}?startapp=${startAppPayload}`
-        : `https://t.me/${BOT_USERNAME}?start=${startAppPayload}`
-      : null;
+    const telegramDeepLink = null;
     const webInviteLink = `${PUBLIC_WEBAPP_URL || appOrigin}/?ref=${encodeURIComponent(referralCode)}`;
 
     const walletRes = await client.query(
@@ -1260,7 +1565,12 @@ async function buildDashboardPayload(tgUser, appOrigin) {
 
     return {
       auth: {
-        mode: tgUser.verified ? 'telegram_verified' : 'browser_sandbox',
+        mode:
+          tgUser.authMode === 'web_authenticated'
+            ? 'web_authenticated'
+            : tgUser.verified
+              ? 'telegram_verified'
+              : 'browser_sandbox',
         botConfigured: Boolean(BOT_TOKEN),
         botUsername: BOT_USERNAME || null,
         serverTime: now,
@@ -1756,7 +2066,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Admin-Token, X-Telegram-Init-Data, X-Start-Param, X-Sandbox-Client-Id, X-Dev-Sandbox'
+    'Content-Type, Authorization, X-Web-Session, X-Admin-Token, X-Telegram-Init-Data, X-Start-Param, X-Sandbox-Client-Id, X-Dev-Sandbox'
   );
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -1767,8 +2077,72 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '32kb' }));
 
-app.get('/', (_req, res) => {
-  res.status(200).send('HERT Mining backend is running.');
+app.get('/', (req, res) => {
+  const configuredWeb = cleanEnv(process.env.PUBLIC_WEBAPP_URL || process.env.WEBAPP_URL).replace(
+    /\/+$/,
+    ''
+  );
+  const host = (req.header('x-forwarded-host') || req.header('host') || '').split(',')[0].trim();
+  const selfOrigin = host ? `https://${host}` : PUBLIC_WEBAPP_URL;
+  const targetBase =
+    configuredWeb &&
+    configuredWeb.startsWith('https://') &&
+    !/\.(run\.app|ai\.studio)$/i.test(configuredWeb) &&
+    configuredWeb !== selfOrigin
+      ? configuredWeb
+      : selfOrigin;
+
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (k === 'openChrome') continue;
+    if (typeof v === 'string' && v.trim()) qs.set(k, v.trim());
+  }
+  const suffix = qs.toString() ? `/?${qs.toString()}` : '/';
+  const finalHttpsUrl = `${targetBase}${suffix}`;
+  const hostAndPath = finalHttpsUrl.replace(/^https?:\/\//i, '');
+  const androidIntent = `intent://${hostAndPath}#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=${encodeURIComponent(finalHttpsUrl)};end`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HERT Network — Open in Google Chrome</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #070A09; color: #F3F5F4; font-family: system-ui, -apple-system, sans-serif; padding: 20px; }
+    .card { width: 100%; max-width: 460px; background: #0D1210; border: 1px solid rgba(255,255,255,0.09); border-radius: 20px; padding: 28px 24px; text-align: center; }
+    h1 { margin: 0 0 10px; font-size: 22px; color: #F3F5F4; }
+    p { margin: 0 0 22px; font-size: 14px; line-height: 1.55; color: #9AA8A1; }
+    a.primary { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 52px; border-radius: 14px; background: #D4AF37; color: #050706; font-weight: 700; font-size: 15px; text-decoration: none; margin-bottom: 12px; }
+    button.copy { width: 100%; min-height: 46px; border-radius: 14px; background: #141C19; color: #D6DFDA; border: 1px solid rgba(255,255,255,0.1); font-weight: 600; font-size: 13px; cursor: pointer; }
+    .url { margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: #070A09; font-family: ui-monospace, monospace; font-size: 12px; color: #8E9D96; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>HERT Network Web</h1>
+    <p>Tap the button below to open HERT Mining directly in <strong>Google Chrome</strong>.</p>
+    <a id="chromeBtn" class="primary" href="${androidIntent}">Open in Google Chrome</a>
+    <button class="copy" type="button" onclick="navigator.clipboard && navigator.clipboard.writeText('${finalHttpsUrl.replace(/'/g, "\\'")}').then(()=>{this.textContent='Website Link Copied!'})">Copy Website Link</button>
+    <div class="url">${finalHttpsUrl.replace(/</g, '&lt;')}</div>
+  </div>
+  <script>
+    (function(){
+      var ua = navigator.userAgent || '';
+      var btn = document.getElementById('chromeBtn');
+      var target = ${JSON.stringify(finalHttpsUrl)};
+      var hostPath = target.replace(/^https?:\\/\\//i, '');
+      if (/iPhone|iPad|iPod/i.test(ua)) {
+        btn.href = 'googlechrome://' + hostPath;
+      } else if (!/Android/i.test(ua)) {
+        btn.href = target;
+      }
+    })();
+  </script>
+</body>
+</html>`);
 });
 
 const handleHealth = async (_req, res) => {
@@ -1795,6 +2169,670 @@ app.get('/tonconnect-manifest.json', (req, res) => {
     name: 'HERT Mining',
     iconUrl: `${origin}/hert-icon-180.png`,
   });
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    if (!pool) {
+      res.status(503).json({ error: 'Database is not configured.' });
+      return;
+    }
+    const cleanName = String(req.body?.firstName || '').trim().slice(0, 64);
+    if (cleanName.length < 2) {
+      res.status(400).json({ error: 'Please enter your display name (at least 2 characters).' });
+      return;
+    }
+    const normalizedId = normalizeWebIdentifier(req.body?.identifier);
+    if (normalizedId.length < 3 || normalizedId.length > 120 || /\s/.test(normalizedId)) {
+      res.status(400).json({ error: 'Enter a valid username or email address (at least 3 characters).' });
+      return;
+    }
+    const isEmail = normalizedId.includes('@');
+    if (isEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedId)) {
+      res.status(400).json({ error: 'Please enter a valid email address.' });
+      return;
+    }
+    if (!isEmail && !/^[a-z0-9_.-]{3,32}$/.test(normalizedId)) {
+      res.status(400).json({ error: 'Username may contain letters, numbers, underscores, dots, or hyphens.' });
+      return;
+    }
+    const rawPassword = String(req.body?.password || '');
+    if (rawPassword.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+      return;
+    }
+
+    const now = Date.now();
+    const accountId = deriveWebAccountId(normalizedId);
+    const publicUsername = derivePublicUsername(normalizedId);
+    const passwordHash = hashWebPassword(rawPassword);
+
+    await withTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT account_id FROM web_accounts WHERE identifier = $1 OR account_id = $2 LIMIT 1`,
+        [normalizedId, accountId]
+      );
+      if (existing.rows.length > 0) {
+        throw new Error('An account with this username or email already exists. Please Sign In.');
+      }
+      await client.query(
+        `INSERT INTO web_accounts (account_id, identifier, email, username, first_name, last_name, password_hash, created_at, last_login_at)
+         VALUES ($1, $2, $3, $4, $5, NULL, $6, $7::BIGINT, $8::BIGINT)`,
+        [accountId, normalizedId, isEmail ? normalizedId : null, publicUsername, cleanName, passwordHash, now, now]
+      );
+    });
+
+    const referralCode =
+      typeof req.body?.referralCode === 'string' && req.body.referralCode.trim()
+        ? req.body.referralCode.trim().slice(0, 64)
+        : null;
+
+    const tgUser = {
+      telegramId: accountId,
+      username: publicUsername,
+      firstName: cleanName,
+      lastName: null,
+      photoUrl: null,
+      isPremium: false,
+      startParam: referralCode,
+      verified: true,
+      authMode: 'web_authenticated',
+    };
+
+    const session = issueWebSessionToken({
+      accountId,
+      identifier: normalizedId,
+      firstName: cleanName,
+      lastName: null,
+      username: publicUsername,
+    });
+    const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
+    res.json({ token: session.token, expiresAt: session.expiresAt, payload });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to register account.' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    if (!pool) {
+      res.status(503).json({ error: 'Database is not configured.' });
+      return;
+    }
+    const normalizedId = normalizeWebIdentifier(req.body?.identifier);
+    const rawPassword = String(req.body?.password || '');
+    if (!normalizedId || !rawPassword) {
+      res.status(400).json({ error: 'Please enter both your username/email and password.' });
+      return;
+    }
+
+    const resAcc = await pool.query(
+      `SELECT account_id, identifier, first_name, last_name, username, password_hash
+       FROM web_accounts WHERE identifier = $1 LIMIT 1`,
+      [normalizedId]
+    );
+    if (resAcc.rows.length === 0 || !verifyWebPassword(rawPassword, resAcc.rows[0].password_hash)) {
+      res.status(401).json({ error: 'Invalid username/email or password.' });
+      return;
+    }
+
+    const acc = resAcc.rows[0];
+    await pool.query(`UPDATE web_accounts SET last_login_at = $1::BIGINT WHERE account_id = $2`, [
+      Date.now(),
+      acc.account_id,
+    ]);
+
+    const tgUser = {
+      telegramId: String(acc.account_id),
+      username: acc.username || null,
+      firstName: acc.first_name || 'Miner',
+      lastName: acc.last_name || null,
+      photoUrl: null,
+      isPremium: false,
+      startParam: null,
+      verified: true,
+      authMode: 'web_authenticated',
+    };
+
+    const session = issueWebSessionToken({
+      accountId: String(acc.account_id),
+      identifier: acc.identifier,
+      firstName: acc.first_name || 'Miner',
+      lastName: acc.last_name || null,
+      username: acc.username || null,
+    });
+    const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
+    res.json({ token: session.token, expiresAt: session.expiresAt, payload });
+  } catch (err) {
+    res.status(401).json({ error: err.message || 'Invalid credentials.' });
+  }
+});
+
+app.post('/api/auth/logout', (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/migration-preview', (req, res) => {
+  const rawToken = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
+  const rawInitData =
+    typeof req.query?.initData === 'string'
+      ? req.query.initData.trim()
+      : (req.header('x-telegram-init-data') || '').trim();
+
+  if (rawToken) {
+    const verified = verifyTelegramMigrationToken(rawToken);
+    if (verified) {
+      res.json({
+        verified: true,
+        telegramId: verified.telegramId,
+        firstName: verified.firstName,
+        username: verified.username,
+        botUsername: BOT_USERNAME,
+      });
+      return;
+    }
+  }
+
+  if (rawInitData && BOT_TOKEN) {
+    try {
+      const tg = verifyTelegramInitData(rawInitData, BOT_TOKEN);
+      res.json({
+        verified: true,
+        telegramId: tg.telegramId,
+        firstName: tg.firstName,
+        username: tg.username,
+        botUsername: BOT_USERNAME,
+      });
+      return;
+    } catch {
+      // ignore invalid initData
+    }
+  }
+
+  res.json({
+    verified: false,
+    telegramId: null,
+    firstName: null,
+    username: null,
+    botUsername: BOT_USERNAME,
+  });
+});
+
+app.post('/api/auth/stage-migration-code', async (req, res) => {
+  try {
+    if (!pool) {
+      res.status(503).json({ error: 'Database is not configured.' });
+      return;
+    }
+    const tgUser = resolveRequestUser(req);
+    if (BOT_TOKEN && !tgUser.verified) {
+      res.status(401).json({ error: 'Verified Telegram session required.' });
+      return;
+    }
+    const now = Date.now();
+    const expiresAt = now + MIGRATION_TOKEN_TTL_MS;
+    const explicitCode = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+    const code = /^\d{6}$/.test(explicitCode)
+      ? explicitCode
+      : String(crypto.randomInt(100000, 999999));
+
+    await pool.query(
+      `DELETE FROM web_migration_codes WHERE expires_at < $1::BIGINT OR telegram_id = $2`,
+      [now, String(tgUser.telegramId)]
+    );
+    await pool.query(
+      `INSERT INTO web_migration_codes (code, telegram_id, first_name, last_name, username, created_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6::BIGINT, $7::BIGINT)
+       ON CONFLICT (code) DO UPDATE SET
+         telegram_id = EXCLUDED.telegram_id,
+         first_name = EXCLUDED.first_name,
+         last_name = EXCLUDED.last_name,
+         username = EXCLUDED.username,
+         created_at = EXCLUDED.created_at,
+         expires_at = EXCLUDED.expires_at`,
+      [
+        code,
+        String(tgUser.telegramId),
+        tgUser.firstName || 'Miner',
+        tgUser.lastName || null,
+        tgUser.username || null,
+        now,
+        expiresAt,
+      ]
+    );
+    res.json({ ok: true, code, expiresAt });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to stage migration code.' });
+  }
+});
+
+const directMigrationIpBucket = new Map();
+const directMigrationMinerCooldown = new Map();
+
+async function fetchRenderTelegramChatUsername(telegramId) {
+  if (!BOT_TOKEN || !/^\d{5,16}$/.test(String(telegramId))) return null;
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${encodeURIComponent(String(telegramId))}`
+    );
+    const data = await res.json().catch(() => null);
+    if (data && data.ok && data.result && typeof data.result.username === 'string' && data.result.username.trim()) {
+      return data.result.username.trim();
+    }
+  } catch {
+    // ignore transient lookup failures
+  }
+  return null;
+}
+
+app.post('/api/auth/request-telegram-code', async (req, res) => {
+  try {
+    if (!pool) {
+      res.status(503).json({ error: 'Database is not configured.' });
+      return;
+    }
+    if (!BOT_TOKEN) {
+      res.status(503).json({ error: 'Telegram Bot is not configured on this server.' });
+      return;
+    }
+
+    const clientIp =
+      String(req.header('x-forwarded-for') || '')
+        .split(',')[0]
+        .trim() ||
+      req.ip ||
+      'unknown';
+    const now = Date.now();
+    const recentIp = (directMigrationIpBucket.get(clientIp) || []).filter((ts) => now - ts < 10 * 60 * 1000);
+    if (recentIp.length >= 12) {
+      res.status(429).json({
+        error: 'Too many code requests. Please wait a few minutes and try again.',
+      });
+      return;
+    }
+    recentIp.push(now);
+    directMigrationIpBucket.set(clientIp, recentIp);
+
+    const rawLookup = typeof req.body?.lookup === 'string' ? req.body.lookup.trim() : '';
+    if (rawLookup.length < 2 || rawLookup.length > 128) {
+      res.status(400).json({
+        error: 'Enter your Telegram @username, Telegram Name, Invite Code (HERT-XXXXXX), TON Wallet, or Telegram ID.',
+      });
+      return;
+    }
+
+    const cleanedHandle = rawLookup.replace(/^@+/, '').trim().toLowerCase();
+    const upperLookup = rawLookup.toUpperCase();
+    const refMatch = upperLookup.match(/^(?:REF_)?(HERT-[A-Z0-9]{4,12})$/i);
+    const explicitIdMatch = rawLookup.match(/^(?:ref_)?(\d{5,16})$/i);
+
+    let matches = [];
+    const baseSelect = `
+      SELECT u.telegram_id::TEXT AS telegram_id,
+             u.first_name,
+             u.last_name,
+             u.username,
+             u.referral_code,
+             GREATEST(COALESCE(u.points_cents, 0), COALESCE(u.points, 0) * 100)::BIGINT AS points_cents,
+             wc.ton_address
+      FROM users u
+      LEFT JOIN wallet_connections wc
+        ON wc.user_id = u.telegram_id::TEXT AND wc.disconnected_at IS NULL
+      WHERE u.telegram_id::TEXT !~ '^8[0-9]{14}$'
+    `;
+
+    if (explicitIdMatch) {
+      const q = await pool.query(`${baseSelect} AND u.telegram_id::TEXT = $1 LIMIT 5`, [explicitIdMatch[1]]);
+      matches = q.rows;
+    }
+    if (matches.length === 0 && rawLookup.length >= 30) {
+      const q = await pool.query(
+        `${baseSelect} AND LOWER(COALESCE(wc.ton_address, '')) = LOWER($1) LIMIT 5`,
+        [rawLookup]
+      );
+      matches = q.rows;
+    }
+    if (matches.length === 0 && refMatch) {
+      const q = await pool.query(
+        `${baseSelect} AND UPPER(COALESCE(u.referral_code, '')) = UPPER($1) LIMIT 5`,
+        [refMatch[1]]
+      );
+      matches = q.rows;
+    }
+    if (matches.length === 0 && cleanedHandle.length >= 2) {
+      const qUser = await pool.query(
+        `${baseSelect} AND LOWER(COALESCE(u.username, '')) = $1 LIMIT 5`,
+        [cleanedHandle]
+      );
+      matches = qUser.rows;
+
+      if (matches.length === 0 && !rawLookup.startsWith('@')) {
+        const qName = await pool.query(
+          `${baseSelect}
+           AND (
+             LOWER(TRIM(COALESCE(u.first_name, ''))) = $1
+             OR LOWER(TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, ''))) = $1
+           )
+           ORDER BY GREATEST(COALESCE(u.points_cents, 0), COALESCE(u.points, 0) * 100) DESC
+           LIMIT 5`,
+          [cleanedHandle]
+        );
+        matches = qName.rows;
+      }
+
+      if (matches.length === 0) {
+        const nullUserRows = await pool.query(
+          `${baseSelect} AND (u.username IS NULL OR TRIM(u.username) = '') LIMIT 40`
+        );
+        for (const row of nullUserRows.rows) {
+          const liveUsername = await fetchRenderTelegramChatUsername(row.telegram_id);
+          if (liveUsername) {
+            await pool
+              .query(`UPDATE users SET username = $1 WHERE telegram_id::TEXT = $2`, [
+                liveUsername,
+                String(row.telegram_id),
+              ])
+              .catch(() => {});
+            if (liveUsername.toLowerCase() === cleanedHandle) {
+              row.username = liveUsername;
+              matches.push(row);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (matches.length === 0) {
+      res.status(404).json({
+        error:
+          'No existing HERT Telegram miner matched that lookup. Try your Telegram @username, exact Telegram First Name, Invite Code (HERT-XXXXXX), linked TON wallet, or numeric Telegram ID.',
+      });
+      return;
+    }
+
+    if (matches.length > 1) {
+      res.status(409).json({
+        error:
+          'Multiple miners share that first name. Please enter your @username, Invite Code (HERT-XXXXXX), linked TON wallet, or numeric Telegram ID so we send the code to the exact account.',
+      });
+      return;
+    }
+
+    const target = matches[0];
+    const uidStr = String(target.telegram_id);
+    const lastSent = directMigrationMinerCooldown.get(uidStr) || 0;
+    if (now - lastSent < 25 * 1000) {
+      const waitSec = Math.max(1, Math.ceil((25 * 1000 - (now - lastSent)) / 1000));
+      res.status(429).json({
+        error: `Code was just sent to your Telegram chat! Check your messages from @${BOT_USERNAME} (or wait ${waitSec}s to resend).`,
+      });
+      return;
+    }
+
+    const expiresAt = now + MIGRATION_TOKEN_TTL_MS;
+    const code = String(crypto.randomInt(100000, 999999));
+
+    await pool.query(
+      `DELETE FROM web_migration_codes WHERE expires_at < $1::BIGINT OR telegram_id = $2`,
+      [now, uidStr]
+    );
+    await pool.query(
+      `INSERT INTO web_migration_codes (code, telegram_id, first_name, last_name, username, created_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6::BIGINT, $7::BIGINT)
+       ON CONFLICT (code) DO UPDATE SET
+         telegram_id = EXCLUDED.telegram_id,
+         first_name = EXCLUDED.first_name,
+         last_name = EXCLUDED.last_name,
+         username = EXCLUDED.username,
+         created_at = EXCLUDED.created_at,
+         expires_at = EXCLUDED.expires_at`,
+      [
+        code,
+        uidStr,
+        target.first_name || 'Miner',
+        target.last_name || null,
+        target.username || null,
+        now,
+        expiresAt,
+      ]
+    );
+
+    const { token: migToken } = issueTelegramMigrationToken({
+      telegramId: uidStr,
+      firstName: target.first_name || 'Miner',
+      lastName: target.last_name || null,
+      username: target.username || null,
+    });
+    const browserUrl = `${PUBLIC_WEBAPP_URL}/?migrate=${encodeURIComponent(migToken)}`;
+    const safeName = escapeTelegramHtml(target.first_name || 'Miner');
+    const ptsCents = Number(target.points_cents || 0);
+
+    const dmLines = [
+      `🔑 <b>HERT Web Code:</b> <code>${code}</code>`,
+      ``,
+      `Miner: <b>${safeName}</b>`,
+      `Verified Balance: <b>${(ptsCents / 100).toFixed(2)} HERT</b>`,
+      ``,
+      `Enter <code>${code}</code> on the HERT Mining Web page (valid 30 mins), or tap the button below to finish setting your Web password:`,
+    ];
+
+    const tgResp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: uidStr,
+        text: dmLines.join('\n'),
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🌐 Open Web & Set Password', url: browserUrl }]],
+        },
+      }),
+    });
+    const tgJson = await tgResp.json().catch(() => null);
+    if (!tgResp.ok || !tgJson?.ok) {
+      res.status(400).json({
+        error: `Telegram could not deliver a direct message to your chat (${tgJson?.description || 'chat not started'}). Open @${BOT_USERNAME} in Telegram and send /web once.`,
+      });
+      return;
+    }
+
+    directMigrationMinerCooldown.set(uidStr, now);
+    const rawName = String(target.first_name || 'Miner').trim();
+    const maskedHint =
+      rawName.length <= 2 ? `${rawName[0] || 'M'}*` : `${rawName.slice(0, 2)}${'*'.repeat(Math.min(4, rawName.length - 2))}`;
+
+    res.json({
+      ok: true,
+      sent: true,
+      botUsername: BOT_USERNAME,
+      maskedAccountHint: maskedHint,
+      message: `6-digit code sent directly to your Telegram messages from @${BOT_USERNAME}! Check your Telegram chat or phone notification and enter the 6-digit code below.`,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to send Telegram verification code.' });
+  }
+});
+
+app.post('/api/auth/migrate-telegram', async (req, res) => {
+  try {
+    if (!pool) {
+      res.status(503).json({ error: 'Database is not configured.' });
+      return;
+    }
+    const normalizedId = normalizeWebIdentifier(req.body?.identifier);
+    if (normalizedId.length < 3 || normalizedId.length > 120 || /\s/.test(normalizedId)) {
+      res.status(400).json({ error: 'Enter a valid username or email address (at least 3 characters).' });
+      return;
+    }
+    const isEmail = normalizedId.includes('@');
+    if (isEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedId)) {
+      res.status(400).json({ error: 'Please enter a valid email address.' });
+      return;
+    }
+    if (!isEmail && !/^[a-z0-9_.-]{3,32}$/.test(normalizedId)) {
+      res.status(400).json({ error: 'Username may contain letters, numbers, underscores, dots, or hyphens.' });
+      return;
+    }
+    const rawPassword = String(req.body?.password || '');
+    if (rawPassword.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+      return;
+    }
+
+    const migrationToken =
+      typeof req.body?.migrationToken === 'string' ? req.body.migrationToken.trim() : '';
+    const migrationCode =
+      typeof req.body?.migrationCode === 'string' ? req.body.migrationCode.trim() : '';
+    const telegramInitData =
+      typeof req.body?.telegramInitData === 'string' && req.body.telegramInitData.trim()
+        ? req.body.telegramInitData.trim()
+        : (req.header('x-telegram-init-data') || '').trim();
+
+    let verifiedIdentity = null;
+
+    const tokenCandidate = migrationToken || migrationCode;
+    if (tokenCandidate) {
+      const parsed = verifyTelegramMigrationToken(tokenCandidate);
+      if (parsed) {
+        verifiedIdentity = {
+          telegramId: String(parsed.telegramId),
+          firstName: parsed.firstName || 'Miner',
+          lastName: parsed.lastName || null,
+          username: parsed.username || null,
+        };
+      }
+    }
+
+    if (!verifiedIdentity && telegramInitData && BOT_TOKEN) {
+      try {
+        const tg = verifyTelegramInitData(telegramInitData, BOT_TOKEN);
+        verifiedIdentity = {
+          telegramId: String(tg.telegramId),
+          firstName: tg.firstName || 'Miner',
+          lastName: tg.lastName || null,
+          username: tg.username || null,
+        };
+      } catch {
+        // continue
+      }
+    }
+
+    if (!verifiedIdentity && migrationCode) {
+      const cleanCode = migrationCode.replace(/[\s-]+/g, '');
+      if (/^\d{6}$/.test(cleanCode)) {
+        const nowCheck = Date.now();
+        const codeRes = await pool.query(
+          `DELETE FROM web_migration_codes WHERE code = $1 RETURNING *`,
+          [cleanCode]
+        );
+        if (codeRes.rows.length > 0 && Number(codeRes.rows[0].expires_at) >= nowCheck) {
+          const row = codeRes.rows[0];
+          verifiedIdentity = {
+            telegramId: String(row.telegram_id),
+            firstName: row.first_name || 'Miner',
+            lastName: row.last_name || null,
+            username: row.username || null,
+          };
+        }
+      }
+    }
+
+    if (!verifiedIdentity) {
+      res.status(400).json({
+        error:
+          'Invalid or expired Telegram verification code. Open @HERTCoinBot on Telegram and tap "Move Account to Web" (or send /web) to get a fresh 6-digit code.',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const cleanTid = String(verifiedIdentity.telegramId);
+    const passwordHash = hashWebPassword(rawPassword);
+    let resolvedFirstName = String(verifiedIdentity.firstName || 'Miner').slice(0, 64);
+    let resolvedLastName = verifiedIdentity.lastName
+      ? String(verifiedIdentity.lastName).slice(0, 64)
+      : null;
+    let resolvedUsername =
+      (verifiedIdentity.username ? String(verifiedIdentity.username).slice(0, 32) : null) ||
+      derivePublicUsername(normalizedId);
+
+    await withTransaction(async (client) => {
+      const existingTg = await client.query(
+        `SELECT first_name, last_name, username FROM users WHERE telegram_id::TEXT = $1 LIMIT 1`,
+        [cleanTid]
+      );
+      if (existingTg.rows.length > 0) {
+        if (existingTg.rows[0].first_name) resolvedFirstName = existingTg.rows[0].first_name;
+        if (existingTg.rows[0].last_name) resolvedLastName = existingTg.rows[0].last_name;
+        if (existingTg.rows[0].username) resolvedUsername = existingTg.rows[0].username;
+      }
+
+      const conflictRes = await client.query(
+        `SELECT account_id, password_hash FROM web_accounts WHERE identifier = $1 LIMIT 1`,
+        [normalizedId]
+      );
+      if (conflictRes.rows.length > 0 && String(conflictRes.rows[0].account_id) !== cleanTid) {
+        const otherId = String(conflictRes.rows[0].account_id);
+        const isSynthetic = /^8\d{14}$/.test(otherId);
+        const samePass = verifyWebPassword(rawPassword, conflictRes.rows[0].password_hash);
+        if (isSynthetic && samePass) {
+          await client.query(`DELETE FROM web_accounts WHERE account_id = $1`, [otherId]);
+        } else {
+          throw new Error(
+            'This username or email is already used by another account. Choose a different username/email.'
+          );
+        }
+      }
+
+      await client.query(
+        `INSERT INTO web_accounts (account_id, identifier, email, username, first_name, last_name, password_hash, created_at, last_login_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::BIGINT, $8::BIGINT)
+         ON CONFLICT (account_id) DO UPDATE SET
+           identifier = EXCLUDED.identifier,
+           email = EXCLUDED.email,
+           username = EXCLUDED.username,
+           first_name = EXCLUDED.first_name,
+           last_name = EXCLUDED.last_name,
+           password_hash = EXCLUDED.password_hash,
+           last_login_at = EXCLUDED.last_login_at`,
+        [
+          cleanTid,
+          normalizedId,
+          isEmail ? normalizedId : null,
+          resolvedUsername,
+          resolvedFirstName,
+          resolvedLastName,
+          passwordHash,
+          now,
+        ]
+      );
+    });
+
+    const tgUser = {
+      telegramId: cleanTid,
+      username: resolvedUsername,
+      firstName: resolvedFirstName,
+      lastName: resolvedLastName,
+      photoUrl: null,
+      isPremium: false,
+      startParam: null,
+      verified: true,
+      authMode: 'web_authenticated',
+    };
+
+    const session = issueWebSessionToken({
+      accountId: cleanTid,
+      identifier: normalizedId,
+      firstName: resolvedFirstName,
+      lastName: resolvedLastName,
+      username: resolvedUsername,
+    });
+    const payload = await buildDashboardPayload(tgUser, resolveAppOrigin(req));
+    res.json({ token: session.token, expiresAt: session.expiresAt, payload });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to migrate Telegram account to Web.' });
+  }
 });
 
 app.get('/api/state', async (req, res) => {
@@ -2016,9 +3054,64 @@ app.post('/api/checkin/claim', async (req, res) => {
   }
 });
 
+app.post('/api/referrals/stage', async (req, res) => {
+  try {
+    const tgUser = resolveRequestUser(req);
+    if (BOT_TOKEN && !tgUser.verified) {
+      res.status(401).json({ error: 'Verified Telegram session required.' });
+      return;
+    }
+    const rawCode =
+      typeof req.body?.code === 'string' && req.body.code.trim()
+        ? req.body.code.trim()
+        : tgUser.startParam || '';
+    const cleanParam = normalizeReferralParam(rawCode);
+    if (!cleanParam || !pool) {
+      res.json({ ok: true, stagedCode: null });
+      return;
+    }
+
+    const uidStr = String(tgUser.telegramId);
+    const ownCode = generateReferralCode(uidStr);
+    if (cleanParam.toUpperCase() === ownCode || cleanParam === `ref_${uidStr}`) {
+      res.json({ ok: true, stagedCode: null });
+      return;
+    }
+
+    const existingUser = await pool.query(
+      `SELECT 1 FROM users WHERE telegram_id::TEXT = $1 LIMIT 1`,
+      [uidStr]
+    );
+    if (existingUser.rows.length > 0) {
+      res.json({ ok: true, stagedCode: null });
+      return;
+    }
+
+    const now = Date.now();
+    const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
+    await pool.query(
+      `INSERT INTO pending_referrals (telegram_id, referral_code, created_at, expires_at)
+       VALUES ($1, $2, $3::BIGINT, $4::BIGINT)
+       ON CONFLICT (telegram_id) DO UPDATE SET
+         referral_code = EXCLUDED.referral_code,
+         created_at = EXCLUDED.created_at,
+         expires_at = EXCLUDED.expires_at`,
+      [uidStr, cleanParam, now, expiresAt]
+    );
+
+    res.json({ ok: true, stagedCode: cleanParam });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Unable to stage referral code.' });
+  }
+});
+
 app.post('/api/referrals/apply', async (req, res) => {
   try {
     const tgUser = resolveRequestUser(req);
+    if (BOT_TOKEN && !tgUser.verified) {
+      res.status(401).json({ error: 'Verified Telegram Mini App session required.' });
+      return;
+    }
     const code = typeof req.body?.code === 'string' ? req.body.code : '';
     const now = Date.now();
     await withTransaction(async (client) => {
@@ -2026,6 +3119,7 @@ app.post('/api/referrals/apply', async (req, res) => {
       const outcome = await applyReferralInTx(client, tgUser.telegramId, code, now, {
         isNewlyRegistered: false,
         manualEntry: true,
+        verified: tgUser.verified,
       });
       if (!outcome.applied) {
         throw new Error(outcome.reason || 'Unable to apply referral code.');
@@ -3047,29 +4141,13 @@ async function sendTelegramMessage(chatId, text, replyMarkup) {
 
 async function syncTelegramPlayMenuButton(chatId) {
   if (!BOT_TOKEN) return;
-  const playUrl = PUBLIC_WEBAPP_URL.includes('?')
-    ? PUBLIC_WEBAPP_URL
-    : `${PUBLIC_WEBAPP_URL}/?v=5`;
-
-  if (typeof chatId === 'number' || typeof chatId === 'string') {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setChatMenuButton`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        menu_button: { type: 'default' },
-      }),
-    }).catch(() => {});
-  }
-
+  const hasChatId = typeof chatId === 'number' || typeof chatId === 'string';
   const body = {
     menu_button: {
-      type: 'web_app',
-      text: 'Play',
-      web_app: { url: playUrl },
+      type: 'default',
     },
   };
-  if (typeof chatId === 'number' || typeof chatId === 'string') {
+  if (hasChatId) {
     body.chat_id = chatId;
   }
 
@@ -3080,16 +4158,104 @@ async function syncTelegramPlayMenuButton(chatId) {
   }).catch(() => {});
 }
 
-async function handleWebhook(req, res) {
-  if (WEBHOOK_SECRET) {
-    const incoming = req.header('x-telegram-bot-api-secret-token') || '';
-    if (incoming !== WEBHOOK_SECRET) {
-      res.status(403).json({ ok: false });
+function escapeTelegramHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function sendRenderWebMigrationReply(chatId, from, callbackQueryId) {
+  if (!pool) return;
+  if (callbackQueryId && BOT_TOKEN) {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        callback_query_id: callbackQueryId,
+        text: 'Generating your Web Migration link & 6-digit code...',
+      }),
+    }).catch(() => {});
+  }
+
+  const uidStr = String(from.id);
+  const now = Date.now();
+  const expiresAt = now + MIGRATION_TOKEN_TTL_MS;
+  const code = String(crypto.randomInt(100000, 999999));
+
+  await pool.query(
+    `DELETE FROM web_migration_codes WHERE expires_at < $1::BIGINT OR telegram_id = $2`,
+    [now, uidStr]
+  );
+  await pool.query(
+    `INSERT INTO web_migration_codes (code, telegram_id, first_name, last_name, username, created_at, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6::BIGINT, $7::BIGINT)
+     ON CONFLICT (code) DO UPDATE SET
+       telegram_id = EXCLUDED.telegram_id,
+       first_name = EXCLUDED.first_name,
+       last_name = EXCLUDED.last_name,
+       username = EXCLUDED.username,
+       created_at = EXCLUDED.created_at,
+       expires_at = EXCLUDED.expires_at`,
+    [code, uidStr, from.first_name || 'Miner', from.last_name || null, from.username || null, now, expiresAt]
+  );
+
+  const existingRes = await pool.query(
+    `SELECT GREATEST(COALESCE(points_cents, 0), COALESCE(points, 0) * 100)::BIGINT AS pts
+     FROM users WHERE telegram_id::TEXT = $1 LIMIT 1`,
+    [uidStr]
+  );
+  const ptsCents = existingRes.rows.length > 0 ? Number(existingRes.rows[0].pts || 0) : null;
+
+  const { token: migToken } = issueTelegramMigrationToken({
+    telegramId: uidStr,
+    firstName: from.first_name || 'Miner',
+    lastName: from.last_name || null,
+    username: from.username || null,
+  });
+  const browserUrl = `${PUBLIC_WEBAPP_URL}/?migrate=${encodeURIComponent(migToken)}&openChrome=1`;
+  const safeName = escapeTelegramHtml(from.first_name || 'Miner');
+
+  const lines = [
+    `🔑 <b>HERT Web Code:</b> <code>${code}</code>`,
+    ``,
+    `🌐 <b>Move Your HERT Account to Web</b>`,
+    `Miner: <b>${safeName}</b> (ID: <code>${escapeTelegramHtml(uidStr)}</code>)`,
+    ...(ptsCents !== null ? [`Current Balance: <b>${(ptsCents / 100).toFixed(2)} HERT</b>`] : []),
+    ``,
+    `1️⃣ Tap <b>Open in Chrome &amp; Set Password</b> below to jump straight into Google Chrome with your Telegram account pre-verified.`,
+    `2️⃣ Or open <b>${escapeTelegramHtml(PUBLIC_WEBAPP_URL)}</b> in Google Chrome → select <b>From Telegram</b> → enter code <code>${code}</code> and choose your Web username &amp; password.`,
+  ];
+
+  await sendTelegramMessage(chatId, lines.join('\n'), {
+    inline_keyboard: [[{ text: '🌐 Open in Chrome & Set Password', url: browserUrl }]],
+  });
+}
+
+function getExpectedWebhookSecrets() {
+  const secrets = [];
+  if (WEBHOOK_SECRET) secrets.push(WEBHOOK_SECRET);
+  if (BOT_TOKEN) {
+    secrets.push(
+      crypto
+        .createHmac('sha256', 'hert-telegram-webhook-secret-v1')
+        .update(BOT_TOKEN)
+        .digest('hex')
+    );
+  }
+  return secrets;
+}
+
+async function processRenderWebhookUpdate(req) {
+  const cq = req.body?.callback_query;
+  if (cq && cq.from && cq.message?.chat?.id && pool) {
+    const data = String(cq.data || '').trim().toLowerCase();
+    if (data === 'migrate_web' || data === 'web') {
+      await sendRenderWebMigrationReply(cq.message.chat.id, cq.from, cq.id).catch(() => {});
       return;
     }
   }
-
-  res.status(200).json({ ok: true });
 
   const msg = req.body?.message;
   if (!msg || !msg.from || !pool || msg.from.is_bot || !msg.text) return;
@@ -3098,6 +4264,15 @@ async function handleWebhook(req, res) {
   const lower = text.toLowerCase();
   const startMatch = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
   const startPayload = startMatch && startMatch[1] ? startMatch[1].trim() : null;
+
+  if (
+    /^\/(web|migrate|move|code)(?:@\w+)?$/i.test(text) ||
+    (startPayload && /^(migrate_web|migrate|web|move|claim_web)$/i.test(startPayload)) ||
+    /^(move to web|web login|migrate|move account to web)$/i.test(text)
+  ) {
+    await sendRenderWebMigrationReply(msg.chat.id, msg.from).catch(() => {});
+    return;
+  }
 
   const tgUser = {
     telegramId: String(msg.from.id),
@@ -3120,23 +4295,76 @@ async function handleWebhook(req, res) {
 
   try {
     if (startMatch) {
-      await syncTelegramPlayMenuButton();
-      await syncTelegramPlayMenuButton(msg.chat.id);
-      const state = await buildDashboardPayload(tgUser, PUBLIC_WEBAPP_URL);
-      const launchUrl = startPayload
-        ? `${PUBLIC_WEBAPP_URL}${PUBLIC_WEBAPP_URL.includes('?') ? '&' : '?'}ref=${encodeURIComponent(startPayload)}`
-        : `${PUBLIC_WEBAPP_URL}/?v=5`;
+      const now = Date.now();
+      const uidStr = tgUser.telegramId;
+
+      // Read-only lookup: never prematurely create a user or award referral points on /start alone
+      const existingRes = await pool.query(
+        `SELECT u.telegram_id::TEXT AS tid,
+                u.first_name,
+                u.referral_code,
+                GREATEST(COALESCE(u.points_cents, 0), COALESCE(u.points, 0) * 100)::BIGINT AS pts,
+                (SELECT COUNT(*)::INT FROM referrals r WHERE r.referrer_id = u.telegram_id::TEXT) AS invited_cnt
+         FROM users u
+         WHERE u.telegram_id::TEXT = $1
+         LIMIT 1`,
+        [uidStr]
+      );
+      const existingRow = existingRes.rows[0] || null;
+
+      let effectiveRefCode = null;
+      if (!existingRow) {
+        const cleanIncoming = normalizeReferralParam(startPayload);
+        const ownCode = generateReferralCode(uidStr);
+        if (
+          cleanIncoming &&
+          cleanIncoming.toUpperCase() !== ownCode &&
+          cleanIncoming !== `ref_${uidStr}`
+        ) {
+          await pool.query(
+            `INSERT INTO pending_referrals (telegram_id, referral_code, created_at, expires_at)
+             VALUES ($1, $2, $3::BIGINT, $4::BIGINT)
+             ON CONFLICT (telegram_id) DO UPDATE SET
+               referral_code = EXCLUDED.referral_code,
+               created_at = EXCLUDED.created_at,
+               expires_at = EXCLUDED.expires_at`,
+            [uidStr, cleanIncoming, now, now + 7 * 24 * 60 * 60 * 1000]
+          );
+          effectiveRefCode = cleanIncoming;
+        } else {
+          const pendingRes = await pool.query(
+            `SELECT referral_code, expires_at FROM pending_referrals WHERE telegram_id = $1 LIMIT 1`,
+            [uidStr]
+          );
+          if (pendingRes.rows.length > 0 && Number(pendingRes.rows[0].expires_at) >= now) {
+            effectiveRefCode = pendingRes.rows[0].referral_code;
+          }
+        }
+      }
+
+      void syncTelegramPlayMenuButton();
+      void syncTelegramPlayMenuButton(msg.chat.id);
+
+      const launchUrl = effectiveRefCode
+        ? `${PUBLIC_WEBAPP_URL}${PUBLIC_WEBAPP_URL.includes('?') ? '&' : '/?'}ref=${encodeURIComponent(effectiveRefCode)}&openChrome=1`
+        : `${PUBLIC_WEBAPP_URL}/?openChrome=1`;
+
       const inlineMarkup = {
         inline_keyboard: [
-          [{ text: 'Play HERT Mining', web_app: { url: launchUrl } }],
+          [{ text: '🌐 Open Website in Google Chrome', url: launchUrl }],
+          [{ text: '🔑 Get 6-Digit Web Migration Code', callback_data: 'migrate_web' }],
           [{ text: 'Join Community', url: CHANNEL_URL }],
         ],
       };
-      await sendTelegramMessage(
-        msg.chat.id,
-        `<b>Welcome to HERT Mining, ${tgUser.firstName}!</b>\n\nBalance: <b>${(state.user.pointsCents / 100).toFixed(2)} HERT</b>\nInvite Code: <code>${state.referrals.referralCode}</code>\nSuccessful Referrals: <b>${state.referrals.invitedCount}</b>\n\nTap below to open the HERT Mining Mini App:`,
-        inlineMarkup
-      );
+
+      const safeName = escapeTelegramHtml(existingRow?.first_name || tgUser.firstName);
+      const messageBody = existingRow
+        ? `<b>Welcome back to HERT Network, ${safeName}!</b>\n\nBalance: <b>${(Number(existingRow.pts || 0) / 100).toFixed(2)} HERT</b>\nInvite Code: <code>${escapeTelegramHtml(existingRow.referral_code || generateReferralCode(uidStr))}</code>\nSuccessful Referrals: <b>${Number(existingRow.invited_cnt || 0)}</b>\n\nHERT Mining now runs on the Web! Tap <b>Open Website in Google Chrome</b> below, or tap <b>Get 6-Digit Web Migration Code</b> to move your Telegram balance:`
+        : effectiveRefCode
+          ? `<b>Welcome to HERT Network, ${safeName}!</b>\n\nInvite Code Linked: <code>${escapeTelegramHtml(effectiveRefCode)}</code>\n\nTap <b>Open Website in Google Chrome</b> below to create your Web account and unlock your welcome bonus:`
+          : `<b>Welcome to HERT Network, ${safeName}!</b>\n\nTap <b>Open Website in Google Chrome</b> below to start earning HERT Points on the Web:`;
+
+      await sendTelegramMessage(msg.chat.id, messageBody, inlineMarkup);
       return;
     }
 
@@ -3236,6 +4464,30 @@ async function handleWebhook(req, res) {
     }
   } catch (err) {
     console.error('[HERT Webhook Error]:', err);
+  }
+}
+
+async function handleWebhook(req, res) {
+  const allowedSecrets = getExpectedWebhookSecrets();
+  if (WEBHOOK_SECRET) {
+    const incoming = req.header('x-telegram-bot-api-secret-token') || '';
+    if (!allowedSecrets.includes(incoming)) {
+      res.status(403).json({ ok: false });
+      return;
+    }
+  }
+
+  try {
+    await Promise.race([
+      processRenderWebhookUpdate(req),
+      new Promise((resolve) => setTimeout(resolve, 25000)),
+    ]);
+  } catch (err) {
+    console.error('[HERT Webhook Wrapper Error]:', err);
+  }
+
+  if (!res.headersSent) {
+    res.status(200).json({ ok: true });
   }
 }
 
