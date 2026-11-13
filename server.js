@@ -1520,7 +1520,7 @@ const APP_HTML = `<!doctype html>
           '<div class="row"><div class="icon-box ib-gold">✨</div><span class="badge" style="font-size:10px;padding:2px 8px;">' + (d.luckyWheel.canSpin ? 'Free Spin' : 'Cooldown') + '</span></div>' +
           '<div style="margin-top:10px;"><strong style="font-size:12px;display:block;">Daily Lucky Wheel</strong><p class="muted" style="font-size:11px;">Win up to 25.00 HERT</p></div>' +
         '</button>' +
-        '<button class="tile-green" onclick="switchTab(\'checkin\')">' +
+        '<button class="tile-green" onclick="switchTab(&#39;checkin&#39;)">' +
           '<div class="row"><div class="icon-box ib-green">📅</div><span style="color:#34D399;font-weight:700;font-size:11px;">🔥 Day ' + d.checkIn.streakDay + '</span></div>' +
           '<div style="margin-top:10px;"><strong style="font-size:12px;display:block;">Daily Check-In</strong><p class="muted" style="font-size:11px;">' + (d.checkIn.canCheckIn ? 'Claim Reward Now!' : 'Streak Active') + '</p></div>' +
         '</button>' +
@@ -1532,19 +1532,19 @@ const APP_HTML = `<!doctype html>
             '<div><strong style="font-size:12px;">Invite Friends &nbsp;<span class="badge badge-green" style="font-size:10px;padding:2px 7px;">+50.00 HERT</span></strong>' +
             '<p class="muted" style="font-size:11px;">' + d.referrals.invitedCount + ' friends invited so far</p></div>' +
           '</div>' +
-          '<button class="btn-green" onclick="switchTab(\'friends\')">Invite →</button>' +
+          '<button class="btn-green" onclick="switchTab(&#39;friends&#39;)">Invite →</button>' +
         '</div>' +
       '</div>' +
       '<div class="nav-list-card">' +
-        '<button class="nav-list-item" onclick="switchTab(\'checkin\')">' +
+        '<button class="nav-list-item" onclick="switchTab(&#39;checkin&#39;)">' +
           '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-green">📅</div><div><strong style="font-size:12px;display:block;">7-Day Streak Calendar</strong><span class="muted" style="font-size:10px;">Claim daily HERT rewards</span></div></div>' +
           '<span class="muted">›</span>' +
         '</button>' +
-        '<button class="nav-list-item" onclick="switchTab(\'friends\')">' +
+        '<button class="nav-list-item" onclick="switchTab(&#39;friends&#39;)">' +
           '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-green">👥</div><div><strong style="font-size:12px;display:block;">Referral Guild</strong><span class="muted" style="font-size:10px;">' + d.referrals.invitedCount + ' invited • +50.00 HERT per referral</span></div></div>' +
           '<span class="muted">›</span>' +
         '</button>' +
-        '<button class="nav-list-item" onclick="switchTab(\'airdrop\')">' +
+        '<button class="nav-list-item" onclick="switchTab(&#39;airdrop&#39;)">' +
           '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-blue">💎</div><div><strong style="font-size:12px;display:block;">TON Wallet &amp; Airdrop</strong><span class="muted" style="font-size:10px;">' + (d.wallet.connected ? 'TON Connected' : 'Connect for Airdrop eligibility') + '</span></div></div>' +
           '<span class="muted">›</span>' +
         '</button>' +
@@ -1564,9 +1564,9 @@ const APP_HTML = `<!doctype html>
         '<p class="muted">Complete verified community missions (' + doneCount + '/' + d.tasks.length + ' completed)</p>' +
       '</div>' +
       '<div class="pills">' +
-        '<button class="pill ' + (state.taskFilter==='all'?'active':'') + '" onclick="state.taskFilter=\'all\';render()">All (' + d.tasks.length + ')</button>' +
-        '<button class="pill ' + (state.taskFilter==='social'?'active':'') + '" onclick="state.taskFilter=\'social\';render()">Social &amp; Milestones</button>' +
-        '<button class="pill ' + (state.taskFilter==='partner'?'active':'') + '" onclick="state.taskFilter=\'partner\';render()">Partners</button>' +
+        '<button class="pill ' + (state.taskFilter==='all'?'active':'') + '" onclick="state.taskFilter=&#39;all&#39;;render()">All (' + d.tasks.length + ')</button>' +
+        '<button class="pill ' + (state.taskFilter==='social'?'active':'') + '" onclick="state.taskFilter=&#39;social&#39;;render()">Social &amp; Milestones</button>' +
+        '<button class="pill ' + (state.taskFilter==='partner'?'active':'') + '" onclick="state.taskFilter=&#39;partner&#39;;render()">Partners</button>' +
       '</div>';
 
       list.forEach(function(t) {
@@ -1574,11 +1574,11 @@ const APP_HTML = `<!doctype html>
         if (t.status === 'claimed') {
           btn = '<span class="badge badge-green">✓ Claimed</span>';
         } else if (t.status === 'ready_to_claim') {
-          btn = '<button class="btn-green" onclick="claimTask(\'' + t.id + '\')">Claim +' + fmt(t.rewardCents) + '</button>';
+          btn = '<button class="btn-green" onclick="claimTask(&#39;' + t.id + '&#39;)">Claim +' + fmt(t.rewardCents) + '</button>';
         } else if (t.status === 'verifying') {
           btn = '<button class="btn-dark" onclick="loadDashboard()">Verify (' + t.waitSec + 's)</button>';
         } else {
-          btn = '<button class="btn-gold" onclick="startTask(\'' + t.id + '\')">' + (t.actionLabel || 'Start') + '</button>';
+          btn = '<button class="btn-gold" onclick="startTask(&#39;' + t.id + '&#39;)">' + (t.actionLabel || 'Start') + '</button>';
         }
         html += '<div class="task-card">' +
           '<div style="flex:1;min-width:0;">' +
@@ -1611,7 +1611,7 @@ const APP_HTML = `<!doctype html>
           ? '<button class="btn-green btn-full" onclick="claimCheckIn()">Claim Day ' + ci.streakDay + ' Reward</button>'
           : '<button class="btn-dark btn-full btn-disabled">Next Check-In in ' + fmtTime(ci.cooldownRemainingMs) + '</button>') +
       '</div>' +
-      '<button class="btn-dark btn-full" onclick="switchTab(\'home\')">← Back to Mining Home</button>';
+      '<button class="btn-dark btn-full" onclick="switchTab(&#39;home&#39;)">← Back to Mining Home</button>';
     }
 
     function renderFriends(d) {
@@ -1631,12 +1631,12 @@ const APP_HTML = `<!doctype html>
         '<h2 class="font-display" style="margin:6px 0;">Invite Friends &amp; Earn</h2>' +
         '<p class="muted" style="margin-bottom:14px;">Get <strong style="color:#E5C158;">+50.00 HERT</strong> for every friend invited + +0.50 HERT/hr mining boost!</p>' +
         '<button class="btn-gold btn-full" onclick="shareTg()">🚀 Share on Telegram (+50.00 HERT)</button>' +
-        '<button class="btn-dark btn-full" style="margin-top:8px;" onclick="copyText(\'' + r.telegramDeepLink + '\', \'Invite link copied!\')">Copy Invite Link</button>' +
+        '<button class="btn-dark btn-full" style="margin-top:8px;" onclick="copyText(&#39;' + r.telegramDeepLink + '&#39;, &#39;Invite link copied!&#39;)">Copy Invite Link</button>' +
       '</div>' +
       '<div class="card">' +
         '<span class="label">Your Referral Code</span>' +
         '<div class="row" style="margin-top:6px;"><strong class="font-mono" style="font-size:18px;">' + r.referralCode + '</strong>' +
-        '<button class="btn-dark" onclick="copyText(\'' + r.referralCode + '\', \'Referral code copied!\')">Copy Code</button></div>' +
+        '<button class="btn-dark" onclick="copyText(&#39;' + r.referralCode + '&#39;, &#39;Referral code copied!&#39;)">Copy Code</button></div>' +
       '</div>' +
       (!d.user.referredBy ? '<div class="card"><span class="label">Have an Invite Code? (+50.00 HERT)</span><div class="row" style="margin-top:8px;">' +
         '<input id="apply-ref-input" class="input" style="margin:0;" placeholder="Enter code e.g. HERT-1234" />' +
@@ -1663,16 +1663,16 @@ const APP_HTML = `<!doctype html>
               '<div class="row"><span class="muted">Connected App:</span><strong style="color:#34D399;font-size:12px;">' + (w.appName || 'TON Wallet') + '</strong></div>' +
               '<div class="row" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">' +
                 '<div><span class="muted" style="font-size:10px;">Address:</span><p class="font-mono" style="margin:2px 0 0;font-size:12px;font-weight:700;">' + shortAddr(w.address) + '</p></div>' +
-                '<button class="btn-dark" style="color:#D4AF37;padding:6px 10px;" onclick="copyText(\'' + w.address + '\', \'Address copied!\')">Copy</button>' +
+                '<button class="btn-dark" style="color:#D4AF37;padding:6px 10px;" onclick="copyText(&#39;' + w.address + '&#39;, &#39;Address copied!&#39;)">Copy</button>' +
               '</div>' +
             '</div>' +
             '<button class="btn-danger" style="margin-top:12px;" onclick="disconnectWallet()">Disconnect Wallet</button>'
           : '<p class="muted" style="margin:12px 0;">Connect your non-custodial TON wallet securely via TON Connect 2.0 (Tonkeeper, Telegram Wallet, or MyTonWallet).</p>' +
             '<button class="btn-ton btn-full" onclick="openTonConnect()">💎 Connect TON Wallet</button>' +
             '<div class="wallet-grid">' +
-              '<button class="wallet-tile" onclick="openTonConnect(\'tonkeeper\')"><strong style="font-size:11px;">Tonkeeper</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
-              '<button class="wallet-tile" onclick="openTonConnect(\'telegram-wallet\')"><strong style="font-size:11px;">TG @wallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
-              '<button class="wallet-tile" onclick="openTonConnect(\'mytonwallet\')"><strong style="font-size:11px;">MyTonWallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(&#39;tonkeeper&#39;)"><strong style="font-size:11px;">Tonkeeper</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(&#39;telegram-wallet&#39;)"><strong style="font-size:11px;">TG @wallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(&#39;mytonwallet&#39;)"><strong style="font-size:11px;">MyTonWallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
             '</div>' +
             '<div style="margin-top:10px;">' +
               '<button style="background:none;border:none;color:#8E9D96;font-size:11px;font-weight:600;cursor:pointer;padding:2px 0;" onclick="state.showManualWallet=!state.showManualWallet;render()">' +
@@ -1680,7 +1680,7 @@ const APP_HTML = `<!doctype html>
               '</button>' +
               (state.showManualWallet
                 ? '<div style="margin-top:8px;"><input id="inline-wallet-input" class="input font-mono" placeholder="Paste UQ... or EQ... TON wallet address" />' +
-                  '<button class="btn-gold btn-full" onclick="connectManualWallet(\'inline-wallet-input\')">Save TON Address</button></div>'
+                  '<button class="btn-gold btn-full" onclick="connectManualWallet(&#39;inline-wallet-input&#39;)">Save TON Address</button></div>'
                 : '') +
             '</div>') +
       '</div>';
@@ -1703,9 +1703,9 @@ const APP_HTML = `<!doctype html>
       '</div>';
 
       var segNav = '<div class="seg-tabs">' +
-        '<button class="seg-btn ' + (state.airdropSub==='eligibility'?'active':'') + '" onclick="state.airdropSub=\'eligibility\';render()">Eligibility</button>' +
-        '<button class="seg-btn ' + (state.airdropSub==='tokenomics'?'active':'') + '" onclick="state.airdropSub=\'tokenomics\';render()">Tokenomics</button>' +
-        '<button class="seg-btn ' + (state.airdropSub==='roadmap'?'active':'') + '" onclick="state.airdropSub=\'roadmap\';render()">Roadmap</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='eligibility'?'active':'') + '" onclick="state.airdropSub=&#39;eligibility&#39;;render()">Eligibility</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='tokenomics'?'active':'') + '" onclick="state.airdropSub=&#39;tokenomics&#39;;render()">Tokenomics</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='roadmap'?'active':'') + '" onclick="state.airdropSub=&#39;roadmap&#39;;render()">Roadmap</button>' +
       '</div>';
 
       var subHtml = '';
@@ -1741,8 +1741,8 @@ const APP_HTML = `<!doctype html>
         '<div class="row" style="border-bottom:1px solid var(--border);padding-bottom:12px;">' +
           '<div><h2 class="font-display" style="margin:0;font-size:17px;">🛡️ Administrator Console</h2></div>' +
           '<div style="display:flex;gap:6px;">' +
-            '<button class="btn-dark" style="border-color:rgba(212,175,55,0.4);color:#E5C158;padding:6px 10px;" onclick="copyText(\'' + adminUrl + '\', \'Admin link copied!\')">Copy Link</button>' +
-            '<button class="btn-dark" style="padding:6px 10px;" onclick="switchTab(\'home\')">Close</button>' +
+            '<button class="btn-dark" style="border-color:rgba(212,175,55,0.4);color:#E5C158;padding:6px 10px;" onclick="copyText(&#39;' + adminUrl + '&#39;, &#39;Admin link copied!&#39;)">Copy Link</button>' +
+            '<button class="btn-dark" style="padding:6px 10px;" onclick="switchTab(&#39;home&#39;)">Close</button>' +
           '</div>' +
         '</div>' +
         '<div class="mine-box" style="margin-top:10px;padding:9px 12px;"><div class="row"><span class="font-mono muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;">' + adminUrl + '</span><span style="color:#34D399;font-size:10px;font-weight:700;">Direct Link</span></div></div>' +
