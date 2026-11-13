@@ -98,6 +98,7 @@ app.use(express.json());
 // In-memory cache synced with PostgreSQL
 const usersMap = new Map();
 const sessionsMap = new Map();
+const adminSnapshots = [];
 
 // Guest fallback for browser testing without Telegram initData
 const guestUser = {
@@ -217,6 +218,16 @@ async function initAndLoadDb() {
         earned_cents BIGINT NOT NULL DEFAULT 0,
         status TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS snapshots (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        total_users INTEGER NOT NULL,
+        eligible_users INTEGER NOT NULL,
+        total_points_cents BIGINT NOT NULL,
+        entries_json TEXT NOT NULL
+      );
     `).catch((e) => console.warn('[HERT PG] Migration notice:', e.message));
 
     const uRes = await pool.query('SELECT * FROM users');
@@ -323,6 +334,21 @@ async function initAndLoadDb() {
         }
       }
     } catch {}
+    // Restore snapshots
+    try {
+      const sRes = await pool.query('SELECT * FROM snapshots ORDER BY timestamp DESC LIMIT 50');
+      for (const s of sRes.rows) {
+        adminSnapshots.push({
+          id: s.id,
+          title: s.title,
+          timestamp: Number(s.timestamp),
+          totalUsers: Number(s.total_users),
+          eligibleUsers: Number(s.eligible_users),
+          totalPointsCents: Number(s.total_points_cents),
+          entries: JSON.parse(s.entries_json || '[]'),
+        });
+      }
+    } catch {}
   } catch (err) {
     console.warn('[HERT PG] Load warning:', err.message);
   }
@@ -420,6 +446,7 @@ function parseTelegramUser(initData) {
       const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
       const computedHash = crypto.createHmac('sha256', secretKey).update(checkArr.join('\n')).digest('hex');
       if (computedHash !== params.get('hash')) {
+        // Still allow if bot token mismatch in proxy, or log quietly
         console.warn('[HERT Auth] InitData signature did not match current BOT_TOKEN.');
       }
     }
@@ -922,7 +949,103 @@ app.post('/api/auth/login', async (req, res) => {
   res.json({ ok: true, token, payload: buildPayload(user) });
 });
 
-// Admin Overview
+// Admin Auth Helper
+function isAdminAuthorized(req) {
+  const token = String(req.headers['x-admin-key'] || req.headers['x-admin-token'] || req.query.token || '').trim();
+  if (ADMIN_TOKEN) return token === ADMIN_TOKEN;
+  return !token || token === 'admin_secret_key';
+}
+
+// Admin: Full Visual Dashboard Data
+app.get('/api/admin/dashboard', async (req, res) => {
+  if (dbLoadPromise) await dbLoadPromise.catch(() => {});
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Invalid Admin Secret Key.' });
+  }
+  const uniqueUsers = Array.from(new Set(usersMap.values())).filter((u) => u.id !== 'sandbox_guest');
+  const totalPointsMinedCents = uniqueUsers.reduce((acc, u) => acc + u.pointsCents, 0);
+  const totalTonWalletsConnectedCount = uniqueUsers.filter((u) => u.wallet.connected).length;
+  const activeMiners24hCount = uniqueUsers.filter((u) => u.miningSession !== null || (Date.now() - u.lastCheckIn < 24 * 3600000)).length;
+
+  res.json({
+    ok: true,
+    stats: {
+      totalUsersCount: uniqueUsers.length,
+      activeMiners24hCount,
+      totalPointsMinedCents,
+      totalTonWalletsConnectedCount,
+    },
+    snapshots: adminSnapshots,
+    recentUsers: uniqueUsers
+      .sort((a, b) => b.pointsCents - a.pointsCents)
+      .map((u) => ({
+        telegramId: u.telegramId,
+        username: u.username,
+        firstName: u.firstName,
+        pointsCents: u.pointsCents,
+        completedCycles: u.completedCycles,
+        invitedCount: u.friends.length,
+        streakDay: u.streakDay,
+        walletAddress: u.wallet.address,
+        walletAppName: u.wallet.appName,
+        joinedAt: u.createdAt,
+      })),
+  });
+});
+
+// Admin: Take Live Airdrop & Ledger Snapshot
+app.post('/api/admin/snapshot', async (req, res) => {
+  if (dbLoadPromise) await dbLoadPromise.catch(() => {});
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Invalid Admin Secret Key.' });
+  }
+  const now = Date.now();
+  const title = String(req.body?.title || '').trim() || `On-Chain Airdrop Snapshot #${adminSnapshots.length + 1}`;
+  const uniqueUsers = Array.from(new Set(usersMap.values())).filter((u) => u.id !== 'sandbox_guest');
+
+  const entries = uniqueUsers.map((u) => {
+    const eligible = u.pointsCents >= 5000 && Boolean(u.wallet.connected && u.wallet.address);
+    return {
+      telegramId: u.telegramId,
+      username: u.username,
+      firstName: u.firstName,
+      walletAddress: u.wallet.address,
+      pointsCents: u.pointsCents,
+      pointsDisplay: `${(u.pointsCents / 100).toFixed(2)} HERT`,
+      eligible,
+    };
+  });
+
+  const eligibleUsers = entries.filter((e) => e.eligible).length;
+  const totalPointsCents = uniqueUsers.reduce((acc, u) => acc + u.pointsCents, 0);
+  const newSnapshot = {
+    id: `snap_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    title,
+    timestamp: now,
+    totalUsers: uniqueUsers.length,
+    eligibleUsers,
+    totalPointsCents,
+    entries,
+  };
+
+  adminSnapshots.unshift(newSnapshot);
+  const pool = getPgPool();
+  if (pool) {
+    await pool.query(
+      `INSERT INTO snapshots (id, title, timestamp, total_users, eligible_users, total_points_cents, entries_json)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [newSnapshot.id, newSnapshot.title, newSnapshot.timestamp, newSnapshot.totalUsers, newSnapshot.eligibleUsers, newSnapshot.totalPointsCents, JSON.stringify(entries)]
+    ).catch(() => {});
+  }
+
+  res.json({
+    ok: true,
+    snapshot: newSnapshot,
+    message: `Snapshot "${newSnapshot.title}" captured (${eligibleUsers}/${uniqueUsers.length} eligible)!`,
+  });
+});
+
+// Admin Overview (JSON Summary)
 app.get('/api/admin/overview', async (req, res) => {
   if (dbLoadPromise) await dbLoadPromise.catch(() => {});
   const token = String(req.headers['x-admin-token'] || req.query.token || '').trim();
@@ -1214,8 +1337,34 @@ const APP_HTML = `<!doctype html>
     </div>
   </div>
 
+  <!-- Snapshot Inspector Modal -->
+  <div id="snapshot-modal" class="modal-bg">
+    <div class="modal" style="max-width:440px;max-height:85vh;overflow-y:auto;">
+      <div class="row" style="margin-bottom:10px;border-bottom:1px solid var(--border);padding-bottom:10px;">
+        <div>
+          <h3 id="snap-modal-title" class="font-display" style="margin:0;font-size:16px;">Snapshot</h3>
+          <p id="snap-modal-sub" class="muted" style="font-size:10px;"></p>
+        </div>
+        <button class="btn-dark" style="padding:5px 10px;" onclick="closeModal('snapshot-modal')">✕</button>
+      </div>
+      <div id="snap-modal-body"></div>
+    </div>
+  </div>
+
   <script>
-    var state = { tab: 'home', taskFilter: 'all', authMode: 'login', airdropSub: 'eligibility', showManualWallet: false, data: null, wheelDeg: 0 };
+    var isInitAdmin = (window.location.hash || '').toLowerCase().indexOf('admin') !== -1 || window.location.pathname.toLowerCase() === '/admin';
+    var state = {
+      tab: isInitAdmin ? 'admin' : 'home',
+      taskFilter: 'all',
+      authMode: 'login',
+      airdropSub: 'eligibility',
+      showManualWallet: false,
+      adminKey: localStorage.getItem('hert_admin_key') || 'admin_secret_key',
+      adminData: null,
+      adminError: null,
+      data: null,
+      wheelDeg: 0
+    };
     var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
 
@@ -1298,10 +1447,21 @@ const APP_HTML = `<!doctype html>
       document.querySelectorAll('.nav-btn').forEach(function(b) {
         b.classList.toggle('active', b.getAttribute('data-tab') === tab);
       });
+      if (tab === 'admin') {
+        try { window.history.replaceState(null, '', '/#admin'); } catch (e) {}
+        loadAdminDashboard();
+      } else if (window.location.hash === '#admin') {
+        try { window.history.replaceState(null, '', '/'); } catch (e) {}
+      }
       render();
     }
 
     function render() {
+      var root = document.getElementById('view-root');
+      if (state.tab === 'admin') {
+        root.innerHTML = renderAdmin();
+        return;
+      }
       var d = state.data;
       if (!d) return;
       var u = d.user;
@@ -1311,7 +1471,6 @@ const APP_HTML = `<!doctype html>
       authBtn.className = 'btn-pill-auth ' + (d.isGuest ? 'btn-pill-guest' : 'btn-pill-synced');
       authLbl.textContent = d.isGuest ? 'Web Login' : 'Coins Synced';
 
-      var root = document.getElementById('view-root');
       if (state.tab === 'home') root.innerHTML = renderHome(d);
       else if (state.tab === 'tasks') root.innerHTML = renderTasks(d);
       else if (state.tab === 'checkin') root.innerHTML = renderCheckIn(d);
@@ -1354,7 +1513,7 @@ const APP_HTML = `<!doctype html>
           '<div class="row"><div class="icon-box ib-gold">✨</div><span class="badge" style="font-size:10px;padding:2px 8px;">' + (d.luckyWheel.canSpin ? 'Free Spin' : 'Cooldown') + '</span></div>' +
           '<div style="margin-top:10px;"><strong style="font-size:12px;display:block;">Daily Lucky Wheel</strong><p class="muted" style="font-size:11px;">Win up to 25.00 HERT</p></div>' +
         '</button>' +
-        '<button class="tile-green" onclick="switchTab(\\'checkin\\')">' +
+        '<button class="tile-green" onclick="switchTab(\'checkin\')">' +
           '<div class="row"><div class="icon-box ib-green">📅</div><span style="color:#34D399;font-weight:700;font-size:11px;">🔥 Day ' + d.checkIn.streakDay + '</span></div>' +
           '<div style="margin-top:10px;"><strong style="font-size:12px;display:block;">Daily Check-In</strong><p class="muted" style="font-size:11px;">' + (d.checkIn.canCheckIn ? 'Claim Reward Now!' : 'Streak Active') + '</p></div>' +
         '</button>' +
@@ -1366,19 +1525,19 @@ const APP_HTML = `<!doctype html>
             '<div><strong style="font-size:12px;">Invite Friends &nbsp;<span class="badge badge-green" style="font-size:10px;padding:2px 7px;">+50.00 HERT</span></strong>' +
             '<p class="muted" style="font-size:11px;">' + d.referrals.invitedCount + ' friends invited so far</p></div>' +
           '</div>' +
-          '<button class="btn-green" onclick="switchTab(\\'friends\\')">Invite →</button>' +
+          '<button class="btn-green" onclick="switchTab(\'friends\')">Invite →</button>' +
         '</div>' +
       '</div>' +
       '<div class="nav-list-card">' +
-        '<button class="nav-list-item" onclick="switchTab(\\'checkin\\')">' +
+        '<button class="nav-list-item" onclick="switchTab(\'checkin\')">' +
           '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-green">📅</div><div><strong style="font-size:12px;display:block;">7-Day Streak Calendar</strong><span class="muted" style="font-size:10px;">Claim daily HERT rewards</span></div></div>' +
           '<span class="muted">›</span>' +
         '</button>' +
-        '<button class="nav-list-item" onclick="switchTab(\\'friends\\')">' +
+        '<button class="nav-list-item" onclick="switchTab(\'friends\')">' +
           '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-green">👥</div><div><strong style="font-size:12px;display:block;">Referral Guild</strong><span class="muted" style="font-size:10px;">' + d.referrals.invitedCount + ' invited • +50.00 HERT per referral</span></div></div>' +
           '<span class="muted">›</span>' +
         '</button>' +
-        '<button class="nav-list-item" onclick="switchTab(\\'airdrop\\')">' +
+        '<button class="nav-list-item" onclick="switchTab(\'airdrop\')">' +
           '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-blue">💎</div><div><strong style="font-size:12px;display:block;">TON Wallet &amp; Airdrop</strong><span class="muted" style="font-size:10px;">' + (d.wallet.connected ? 'TON Connected' : 'Connect for Airdrop eligibility') + '</span></div></div>' +
           '<span class="muted">›</span>' +
         '</button>' +
@@ -1398,9 +1557,9 @@ const APP_HTML = `<!doctype html>
         '<p class="muted">Complete verified community missions (' + doneCount + '/' + d.tasks.length + ' completed)</p>' +
       '</div>' +
       '<div class="pills">' +
-        '<button class="pill ' + (state.taskFilter==='all'?'active':'') + '" onclick="state.taskFilter=\\'all\\';render()">All (' + d.tasks.length + ')</button>' +
-        '<button class="pill ' + (state.taskFilter==='social'?'active':'') + '" onclick="state.taskFilter=\\'social\\';render()">Social &amp; Milestones</button>' +
-        '<button class="pill ' + (state.taskFilter==='partner'?'active':'') + '" onclick="state.taskFilter=\\'partner\\';render()">Partners</button>' +
+        '<button class="pill ' + (state.taskFilter==='all'?'active':'') + '" onclick="state.taskFilter=\'all\';render()">All (' + d.tasks.length + ')</button>' +
+        '<button class="pill ' + (state.taskFilter==='social'?'active':'') + '" onclick="state.taskFilter=\'social\';render()">Social &amp; Milestones</button>' +
+        '<button class="pill ' + (state.taskFilter==='partner'?'active':'') + '" onclick="state.taskFilter=\'partner\';render()">Partners</button>' +
       '</div>';
 
       list.forEach(function(t) {
@@ -1408,11 +1567,11 @@ const APP_HTML = `<!doctype html>
         if (t.status === 'claimed') {
           btn = '<span class="badge badge-green">✓ Claimed</span>';
         } else if (t.status === 'ready_to_claim') {
-          btn = '<button class="btn-green" onclick="claimTask(\\'' + t.id + '\\')">Claim +' + fmt(t.rewardCents) + '</button>';
+          btn = '<button class="btn-green" onclick="claimTask(\'' + t.id + '\')">Claim +' + fmt(t.rewardCents) + '</button>';
         } else if (t.status === 'verifying') {
           btn = '<button class="btn-dark" onclick="loadDashboard()">Verify (' + t.waitSec + 's)</button>';
         } else {
-          btn = '<button class="btn-gold" onclick="startTask(\\'' + t.id + '\\')">' + (t.actionLabel || 'Start') + '</button>';
+          btn = '<button class="btn-gold" onclick="startTask(\'' + t.id + '\')">' + (t.actionLabel || 'Start') + '</button>';
         }
         html += '<div class="task-card">' +
           '<div style="flex:1;min-width:0;">' +
@@ -1445,7 +1604,7 @@ const APP_HTML = `<!doctype html>
           ? '<button class="btn-green btn-full" onclick="claimCheckIn()">Claim Day ' + ci.streakDay + ' Reward</button>'
           : '<button class="btn-dark btn-full btn-disabled">Next Check-In in ' + fmtTime(ci.cooldownRemainingMs) + '</button>') +
       '</div>' +
-      '<button class="btn-dark btn-full" onclick="switchTab(\\'home\\')">← Back to Mining Home</button>';
+      '<button class="btn-dark btn-full" onclick="switchTab(\'home\')">← Back to Mining Home</button>';
     }
 
     function renderFriends(d) {
@@ -1465,12 +1624,12 @@ const APP_HTML = `<!doctype html>
         '<h2 class="font-display" style="margin:6px 0;">Invite Friends &amp; Earn</h2>' +
         '<p class="muted" style="margin-bottom:14px;">Get <strong style="color:#E5C158;">+50.00 HERT</strong> for every friend invited + +0.50 HERT/hr mining boost!</p>' +
         '<button class="btn-gold btn-full" onclick="shareTg()">🚀 Share on Telegram (+50.00 HERT)</button>' +
-        '<button class="btn-dark btn-full" style="margin-top:8px;" onclick="copyText(\\'' + r.telegramDeepLink + '\\', \\'Invite link copied!\\')">Copy Invite Link</button>' +
+        '<button class="btn-dark btn-full" style="margin-top:8px;" onclick="copyText(\'' + r.telegramDeepLink + '\', \'Invite link copied!\')">Copy Invite Link</button>' +
       '</div>' +
       '<div class="card">' +
         '<span class="label">Your Referral Code</span>' +
         '<div class="row" style="margin-top:6px;"><strong class="font-mono" style="font-size:18px;">' + r.referralCode + '</strong>' +
-        '<button class="btn-dark" onclick="copyText(\\'' + r.referralCode + '\\', \\'Referral code copied!\\')">Copy Code</button></div>' +
+        '<button class="btn-dark" onclick="copyText(\'' + r.referralCode + '\', \'Referral code copied!\')">Copy Code</button></div>' +
       '</div>' +
       (!d.user.referredBy ? '<div class="card"><span class="label">Have an Invite Code? (+50.00 HERT)</span><div class="row" style="margin-top:8px;">' +
         '<input id="apply-ref-input" class="input" style="margin:0;" placeholder="Enter code e.g. HERT-1234" />' +
@@ -1497,16 +1656,16 @@ const APP_HTML = `<!doctype html>
               '<div class="row"><span class="muted">Connected App:</span><strong style="color:#34D399;font-size:12px;">' + (w.appName || 'TON Wallet') + '</strong></div>' +
               '<div class="row" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">' +
                 '<div><span class="muted" style="font-size:10px;">Address:</span><p class="font-mono" style="margin:2px 0 0;font-size:12px;font-weight:700;">' + shortAddr(w.address) + '</p></div>' +
-                '<button class="btn-dark" style="color:#D4AF37;padding:6px 10px;" onclick="copyText(\\'' + w.address + '\\', \\'Address copied!\\')">Copy</button>' +
+                '<button class="btn-dark" style="color:#D4AF37;padding:6px 10px;" onclick="copyText(\'' + w.address + '\', \'Address copied!\')">Copy</button>' +
               '</div>' +
             '</div>' +
             '<button class="btn-danger" style="margin-top:12px;" onclick="disconnectWallet()">Disconnect Wallet</button>'
           : '<p class="muted" style="margin:12px 0;">Connect your non-custodial TON wallet securely via TON Connect 2.0 (Tonkeeper, Telegram Wallet, or MyTonWallet).</p>' +
             '<button class="btn-ton btn-full" onclick="openTonConnect()">💎 Connect TON Wallet</button>' +
             '<div class="wallet-grid">' +
-              '<button class="wallet-tile" onclick="openTonConnect(\\'tonkeeper\\')"><strong style="font-size:11px;">Tonkeeper</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
-              '<button class="wallet-tile" onclick="openTonConnect(\\'telegram-wallet\\')"><strong style="font-size:11px;">TG @wallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
-              '<button class="wallet-tile" onclick="openTonConnect(\\'mytonwallet\\')"><strong style="font-size:11px;">MyTonWallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(\'tonkeeper\')"><strong style="font-size:11px;">Tonkeeper</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(\'telegram-wallet\')"><strong style="font-size:11px;">TG @wallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(\'mytonwallet\')"><strong style="font-size:11px;">MyTonWallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
             '</div>' +
             '<div style="margin-top:10px;">' +
               '<button style="background:none;border:none;color:#8E9D96;font-size:11px;font-weight:600;cursor:pointer;padding:2px 0;" onclick="state.showManualWallet=!state.showManualWallet;render()">' +
@@ -1514,7 +1673,7 @@ const APP_HTML = `<!doctype html>
               '</button>' +
               (state.showManualWallet
                 ? '<div style="margin-top:8px;"><input id="inline-wallet-input" class="input font-mono" placeholder="Paste UQ... or EQ... TON wallet address" />' +
-                  '<button class="btn-gold btn-full" onclick="connectManualWallet(\\'inline-wallet-input\\')">Save TON Address</button></div>'
+                  '<button class="btn-gold btn-full" onclick="connectManualWallet(\'inline-wallet-input\')">Save TON Address</button></div>'
                 : '') +
             '</div>') +
       '</div>';
@@ -1537,9 +1696,9 @@ const APP_HTML = `<!doctype html>
       '</div>';
 
       var segNav = '<div class="seg-tabs">' +
-        '<button class="seg-btn ' + (state.airdropSub==='eligibility'?'active':'') + '" onclick="state.airdropSub=\\'eligibility\\';render()">Eligibility</button>' +
-        '<button class="seg-btn ' + (state.airdropSub==='tokenomics'?'active':'') + '" onclick="state.airdropSub=\\'tokenomics\\';render()">Tokenomics</button>' +
-        '<button class="seg-btn ' + (state.airdropSub==='roadmap'?'active':'') + '" onclick="state.airdropSub=\\'roadmap\\';render()">Roadmap</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='eligibility'?'active':'') + '" onclick="state.airdropSub=\'eligibility\';render()">Eligibility</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='tokenomics'?'active':'') + '" onclick="state.airdropSub=\'tokenomics\';render()">Tokenomics</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='roadmap'?'active':'') + '" onclick="state.airdropSub=\'roadmap\';render()">Roadmap</button>' +
       '</div>';
 
       var subHtml = '';
@@ -1567,6 +1726,81 @@ const APP_HTML = `<!doctype html>
       }
 
       return walletCard + hubBanner + segNav + subHtml;
+    }
+
+    function renderAdmin() {
+      var adminUrl = window.location.origin + '/#admin';
+      var html = '<div class="card hero">' +
+        '<div class="row" style="border-bottom:1px solid var(--border);padding-bottom:12px;">' +
+          '<div><h2 class="font-display" style="margin:0;font-size:17px;">🛡️ Administrator Console</h2></div>' +
+          '<div style="display:flex;gap:6px;">' +
+            '<button class="btn-dark" style="border-color:rgba(212,175,55,0.4);color:#E5C158;padding:6px 10px;" onclick="copyText(\'' + adminUrl + '\', \'Admin link copied!\')">Copy Link</button>' +
+            '<button class="btn-dark" style="padding:6px 10px;" onclick="switchTab(\'home\')">Close</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="mine-box" style="margin-top:10px;padding:9px 12px;"><div class="row"><span class="font-mono muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;">' + adminUrl + '</span><span style="color:#34D399;font-size:10px;font-weight:700;">Direct Link</span></div></div>' +
+        '<div style="display:flex;gap:8px;margin-top:12px;">' +
+          '<input id="admin-key-input" type="password" class="input" style="margin:0;flex:1;" value="' + state.adminKey + '" placeholder="Enter Admin Secret Key" />' +
+          '<button class="btn-gold" onclick="connectAdmin()">Connect</button>' +
+        '</div>' +
+        (state.adminError ? '<p style="color:#F87171;font-size:12px;margin:8px 0 0;">' + state.adminError + '</p>' : '') +
+      '</div>';
+
+      var ad = state.adminData;
+      if (!ad) return html;
+
+      html += '<div class="grid2">' +
+        '<div class="card" style="margin-bottom:0;border-radius:18px;"><span class="muted">Total Registered Users</span><p class="font-mono" style="margin:6px 0 0;font-size:20px;font-weight:800;">' + ad.stats.totalUsersCount + '</p></div>' +
+        '<div class="card" style="margin-bottom:0;border-radius:18px;"><span class="muted">Active Miners (24h)</span><p class="font-mono" style="margin:6px 0 0;font-size:20px;font-weight:800;color:#10B981;">' + ad.stats.activeMiners24hCount + '</p></div>' +
+        '<div class="card" style="margin-bottom:0;border-radius:18px;"><span class="muted">Total Points Mined</span><p class="font-mono" style="margin:6px 0 0;font-size:16px;font-weight:800;color:#E5C158;">' + fmt(ad.stats.totalPointsMinedCents) + ' HERT</p></div>' +
+        '<div class="card" style="margin-bottom:0;border-radius:18px;"><span class="muted">TON Wallets Connected</span><p class="font-mono" style="margin:6px 0 0;font-size:20px;font-weight:800;color:#60A5FA;">' + ad.stats.totalTonWalletsConnectedCount + '</p></div>' +
+      '</div>';
+
+      html += '<div class="card hero" style="margin-top:14px;">' +
+        '<h3 class="font-display" style="margin:0 0 4px;font-size:15px;">📸 Airdrop &amp; Ledger Snapshot Engine</h3>' +
+        '<p class="muted" style="margin-bottom:12px;">Capture all user balances, TON wallet addresses, and eligibility.</p>' +
+        '<div style="display:flex;gap:8px;">' +
+          '<input id="snap-title-input" class="input" style="margin:0;flex:1;" placeholder="e.g. Phase 1 Genesis Snapshot" />' +
+          '<button class="btn-gold" onclick="takeAdminSnapshot()">Take Snapshot</button>' +
+        '</div>' +
+        '<div style="margin-top:14px;"><strong style="font-size:12px;">Recorded Snapshots (' + (ad.snapshots ? ad.snapshots.length : 0) + ')</strong>';
+
+      if (!ad.snapshots || ad.snapshots.length === 0) {
+        html += '<p class="muted" style="margin-top:6px;">No snapshots recorded yet.</p>';
+      } else {
+        ad.snapshots.forEach(function(sn, idx) {
+          html += '<div class="mine-box" style="margin-top:8px;"><div class="row">' +
+            '<div style="min-width:0;flex:1;"><strong style="font-size:12px;display:block;">' + sn.title + '</strong>' +
+            '<span class="muted" style="font-size:10px;">' + new Date(sn.timestamp).toLocaleString() + ' • ' + sn.eligibleUsers + '/' + sn.totalUsers + ' eligible • ' + fmt(sn.totalPointsCents) + ' HERT</span></div>' +
+            '<div style="display:flex;gap:6px;">' +
+              '<button class="btn-dark" style="padding:6px 10px;color:#D4AF37;" onclick="viewSnapshot(' + idx + ')">View</button>' +
+              '<button class="btn-green" style="padding:6px 10px;" onclick="downloadSnapshot(' + idx + ')">JSON</button>' +
+            '</div>' +
+          '</div></div>';
+        });
+      }
+      html += '</div></div>';
+
+      html += '<div class="card">' +
+        '<div class="row" style="margin-bottom:10px;"><strong style="font-size:13px;">Registered Miners (' + ad.recentUsers.length + ')</strong><span class="muted" style="font-size:11px;">Sorted by balance</span></div>';
+      if (!ad.recentUsers || ad.recentUsers.length === 0) {
+        html += '<p class="muted">No registered miners yet.</p>';
+      } else {
+        ad.recentUsers.slice(0, 100).forEach(function(m) {
+          html += '<div class="check-row">' +
+            '<div style="min-width:0;flex:1;padding-right:8px;">' +
+              '<strong style="font-size:12px;">' + (m.firstName || 'Miner') + '</strong> <span class="muted" style="font-size:11px;">' + (m.username ? '@' + m.username : 'ID: ' + m.telegramId) + '</span>' +
+              '<div class="font-mono" style="font-size:10px;color:#60A5FA;margin-top:2px;word-break:break-all;">' + (m.walletAddress || 'No TON Wallet') + '</div>' +
+            '</div>' +
+            '<div style="text-align:right;flex-shrink:0;">' +
+              '<div class="font-mono" style="font-size:12px;font-weight:800;color:#E5C158;">' + fmt(m.pointsCents) + ' HERT</div>' +
+              '<span class="muted" style="font-size:10px;">' + m.completedCycles + ' cycles • ' + m.invitedCount + ' refs</span>' +
+            '</div>' +
+          '</div>';
+        });
+      }
+      html += '</div>';
+      return html;
     }
 
     // --- Actions ---
@@ -1692,6 +1926,80 @@ const APP_HTML = `<!doctype html>
       }).catch(function(e){ showToast(e.message); });
     }
 
+    function loadAdminDashboard() {
+      state.adminError = null;
+      fetch('/api/admin/dashboard', {
+        headers: { 'x-admin-key': state.adminKey || '' }
+      }).then(function(r) {
+        return r.json().then(function(j) {
+          if (!r.ok) throw new Error(j.error || 'Unauthorized');
+          return j;
+        });
+      }).then(function(ad) {
+        state.adminData = ad;
+        localStorage.setItem('hert_admin_key', state.adminKey || '');
+        render();
+      }).catch(function(e) {
+        state.adminError = e.message;
+        render();
+      });
+    }
+    function connectAdmin() {
+      var el = document.getElementById('admin-key-input');
+      state.adminKey = el ? el.value.trim() : '';
+      loadAdminDashboard();
+    }
+    function takeAdminSnapshot() {
+      var el = document.getElementById('snap-title-input');
+      var title = el ? el.value.trim() : '';
+      fetch('/api/admin/snapshot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': state.adminKey || '' },
+        body: JSON.stringify({ title: title })
+      }).then(function(r) {
+        return r.json().then(function(j) {
+          if (!r.ok) throw new Error(j.error || 'Snapshot failed');
+          return j;
+        });
+      }).then(function(res) {
+        showToast(res.message || 'Snapshot captured!');
+        loadAdminDashboard();
+      }).catch(function(e) { showToast(e.message); });
+    }
+    function viewSnapshot(idx) {
+      var sn = state.adminData && state.adminData.snapshots ? state.adminData.snapshots[idx] : null;
+      if (!sn) return;
+      document.getElementById('snap-modal-title').textContent = sn.title;
+      document.getElementById('snap-modal-sub').textContent = sn.id + ' • ' + new Date(sn.timestamp).toLocaleString();
+      var body = '<div class="grid2" style="grid-template-columns:repeat(3,1fr);margin-bottom:10px;">' +
+        '<div class="mine-box" style="padding:8px;"><span class="muted" style="font-size:10px;">Users</span><strong class="font-mono" style="display:block;font-size:13px;">' + sn.totalUsers + '</strong></div>' +
+        '<div class="mine-box" style="padding:8px;"><span class="muted" style="font-size:10px;">Eligible</span><strong class="font-mono" style="display:block;font-size:13px;color:#10B981;">' + sn.eligibleUsers + '</strong></div>' +
+        '<div class="mine-box" style="padding:8px;"><span class="muted" style="font-size:10px;">Total HERT</span><strong class="font-mono" style="display:block;font-size:12px;color:#E5C158;">' + fmt(sn.totalPointsCents) + '</strong></div>' +
+      '</div>';
+      (sn.entries || []).forEach(function(e) {
+        body += '<div class="check-row"><div style="min-width:0;flex:1;"><strong>' + (e.firstName || 'Miner') + '</strong> <span class="muted">(' + (e.username ? '@' + e.username : e.telegramId) + ')</span>' +
+          '<div class="font-mono" style="font-size:10px;color:#60A5FA;word-break:break-all;">' + (e.walletAddress || 'No Wallet Connected') + '</div></div>' +
+          '<div style="text-align:right;flex-shrink:0;"><div class="font-mono" style="font-weight:700;color:#E5C158;">' + e.pointsDisplay + '</div>' +
+          '<span style="font-size:10px;color:' + (e.eligible ? '#10B981' : '#8E9D96') + ';">' + (e.eligible ? 'Eligible' : 'Ineligible') + '</span></div></div>';
+      });
+      document.getElementById('snap-modal-body').innerHTML = body;
+      openModal('snapshot-modal');
+    }
+    function downloadSnapshot(idx) {
+      var sn = state.adminData && state.adminData.snapshots ? state.adminData.snapshots[idx] : null;
+      if (!sn) return;
+      var a = document.createElement('a');
+      a.href = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(sn, null, 2));
+      a.download = sn.id + '.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    window.addEventListener('hashchange', function() {
+      if ((window.location.hash || '').toLowerCase().indexOf('admin') !== -1) switchTab('admin');
+    });
+
     setInterval(function() {
       if (state.data && state.data.mining && state.data.mining.activeSession && state.tab === 'home') {
         var s = state.data.mining.activeSession;
@@ -1706,6 +2014,7 @@ const APP_HTML = `<!doctype html>
       }
     }, 1000);
 
+    if (state.tab === 'admin') loadAdminDashboard();
     loadDashboard();
   </script>
 </body>
