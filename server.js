@@ -1480,6 +1480,10 @@ const APP_HTML = `<!doctype html>
       render();
     }
 
+    function openMinerApp() {
+      window.location.assign('/');
+    }
+
     function render() {
       var root = document.getElementById('view-root');
       document.body.classList.toggle('admin-only', state.tab === 'admin');
@@ -1488,7 +1492,10 @@ const APP_HTML = `<!doctype html>
         return;
       }
       var d = state.data;
-      if (!d) return;
+      if (!d) {
+        root.innerHTML = '<div class="card hero" style="text-align:center;padding:28px 16px;"><p class="muted">Loading HERT Miner...</p></div>';
+        return;
+      }
       var u = d.user;
       document.getElementById('hdr-user').textContent = u.firstName || 'Miner';
       var authBtn = document.getElementById('btn-auth-modal');
@@ -1760,7 +1767,7 @@ const APP_HTML = `<!doctype html>
           '<div><h2 class="font-display" style="margin:0;font-size:18px;">🛡️ HERT Administrator Console</h2><p class="muted" style="font-size:11px;margin-top:2px;">Standalone Admin Dashboard &amp; Snapshot Ledger</p></div>' +
           '<div style="display:flex;gap:6px;">' +
             '<button class="btn-dark" style="border-color:rgba(212,175,55,0.4);color:#E5C158;padding:6px 10px;" onclick="copyText(&#39;' + adminUrl + '&#39;, &#39;Admin link copied!&#39;)">Copy Link</button>' +
-            '<button class="btn-dark" style="padding:6px 10px;" onclick="switchTab(&#39;home&#39;)">Open App</button>' +
+            '<button class="btn-dark" style="padding:6px 10px;" onclick="openMinerApp()">Open App</button>' +
           '</div>' +
         '</div>' +
         '<div class="mine-box" style="margin-top:10px;padding:9px 12px;"><div class="row"><span class="font-mono muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;">' + adminUrl + '</span><span style="color:#34D399;font-size:10px;font-weight:700;">Admin Only</span></div></div>' +
