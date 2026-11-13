@@ -465,15 +465,7 @@ function parseTelegramUser(initData) {
 async function resolveUserFromReq(req) {
   if (dbLoadPromise) await dbLoadPromise.catch(() => {});
 
-  // 1. Check Bearer session token (Web Login)
-  const auth = req.headers.authorization || '';
-  if (auth.startsWith('Bearer ')) {
-    const tok = auth.slice(7).trim();
-    const uid = sessionsMap.get(tok);
-    if (uid && usersMap.has(uid)) return usersMap.get(uid);
-  }
-
-  // 2. Check Telegram Mini App initData
+  // 1. Check Telegram Mini App initData FIRST so switching Telegram accounts never leaks a cached Web token
   const initData = req.headers['x-telegram-init-data'] || req.headers['x-telegram-webapp-data'] || '';
   const tg = parseTelegramUser(initData);
   if (tg) {
@@ -531,6 +523,14 @@ async function resolveUserFromReq(req) {
     indexUser(user);
     await insertNewUserToDb(user);
     return user;
+  }
+
+  // 2. Check Bearer session token (Web Login) for browser users
+  const auth = req.headers.authorization || '';
+  if (auth.startsWith('Bearer ')) {
+    const tok = auth.slice(7).trim();
+    const uid = sessionsMap.get(tok);
+    if (uid && usersMap.has(uid)) return usersMap.get(uid);
   }
 
   return guestUser;
@@ -1116,6 +1116,9 @@ const APP_HTML = `<!doctype html>
     .font-display { font-family: 'Outfit', sans-serif; }
     .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
     .wrap { max-width: 448px; margin: 0 auto; padding: 12px 16px 20px; }
+    body.admin-only { padding-bottom: 28px; }
+    body.admin-only .topbar, body.admin-only .nav { display: none !important; }
+    body.admin-only .wrap { max-width: 720px; padding-top: 20px; }
 
     /* Top Header */
     .topbar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; }
@@ -1352,14 +1355,24 @@ const APP_HTML = `<!doctype html>
   </div>
 
   <script>
-    var isInitAdmin = (window.location.hash || '').toLowerCase().indexOf('admin') !== -1 || window.location.pathname.toLowerCase() === '/admin';
+    function checkIsAdminUrl() {
+      var p = (window.location.pathname || '').toLowerCase();
+      while (p.length > 1 && p.charAt(p.length - 1) === '/') p = p.slice(0, -1);
+      var h = (window.location.hash || '').toLowerCase();
+      var q = (window.location.search || '').toLowerCase();
+      return h.indexOf('admin') !== -1 || p === '/admin' || q.indexOf('tab=admin') !== -1;
+    }
+    var isInitAdmin = checkIsAdminUrl();
+    if (isInitAdmin) {
+      document.body.classList.add('admin-only');
+    }
     var state = {
       tab: isInitAdmin ? 'admin' : 'home',
       taskFilter: 'all',
       authMode: 'login',
       airdropSub: 'eligibility',
       showManualWallet: false,
-      adminKey: localStorage.getItem('hert_admin_key') || 'admin_secret_key',
+      adminKey: localStorage.getItem('hert_admin_key') || '',
       adminData: null,
       adminError: null,
       data: null,
@@ -1451,20 +1464,25 @@ const APP_HTML = `<!doctype html>
 
     function switchTab(tab) {
       state.tab = tab;
+      document.body.classList.toggle('admin-only', tab === 'admin');
       document.querySelectorAll('.nav-btn').forEach(function(b) {
         b.classList.toggle('active', b.getAttribute('data-tab') === tab);
       });
       if (tab === 'admin') {
-        try { window.history.replaceState(null, '', '/#admin'); } catch (e) {}
+        try { window.history.replaceState(null, '', '/admin'); } catch (e) {}
         loadAdminDashboard();
-      } else if (window.location.hash === '#admin') {
-        try { window.history.replaceState(null, '', '/'); } catch (e) {}
+      } else {
+        if (window.location.pathname.toLowerCase().indexOf('/admin') !== -1 || window.location.hash.toLowerCase().indexOf('admin') !== -1) {
+          try { window.history.replaceState(null, '', '/'); } catch (e) {}
+        }
+        if (!state.data) loadDashboard();
       }
       render();
     }
 
     function render() {
       var root = document.getElementById('view-root');
+      document.body.classList.toggle('admin-only', state.tab === 'admin');
       if (state.tab === 'admin') {
         root.innerHTML = renderAdmin();
         return;
@@ -1736,18 +1754,18 @@ const APP_HTML = `<!doctype html>
     }
 
     function renderAdmin() {
-      var adminUrl = window.location.origin + '/#admin';
+      var adminUrl = window.location.origin + '/admin';
       var html = '<div class="card hero">' +
         '<div class="row" style="border-bottom:1px solid var(--border);padding-bottom:12px;">' +
-          '<div><h2 class="font-display" style="margin:0;font-size:17px;">🛡️ Administrator Console</h2></div>' +
+          '<div><h2 class="font-display" style="margin:0;font-size:18px;">🛡️ HERT Administrator Console</h2><p class="muted" style="font-size:11px;margin-top:2px;">Standalone Admin Dashboard &amp; Snapshot Ledger</p></div>' +
           '<div style="display:flex;gap:6px;">' +
             '<button class="btn-dark" style="border-color:rgba(212,175,55,0.4);color:#E5C158;padding:6px 10px;" onclick="copyText(&#39;' + adminUrl + '&#39;, &#39;Admin link copied!&#39;)">Copy Link</button>' +
-            '<button class="btn-dark" style="padding:6px 10px;" onclick="switchTab(&#39;home&#39;)">Close</button>' +
+            '<button class="btn-dark" style="padding:6px 10px;" onclick="switchTab(&#39;home&#39;)">Open App</button>' +
           '</div>' +
         '</div>' +
-        '<div class="mine-box" style="margin-top:10px;padding:9px 12px;"><div class="row"><span class="font-mono muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;">' + adminUrl + '</span><span style="color:#34D399;font-size:10px;font-weight:700;">Direct Link</span></div></div>' +
+        '<div class="mine-box" style="margin-top:10px;padding:9px 12px;"><div class="row"><span class="font-mono muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;">' + adminUrl + '</span><span style="color:#34D399;font-size:10px;font-weight:700;">Admin Only</span></div></div>' +
         '<div style="display:flex;gap:8px;margin-top:12px;">' +
-          '<input id="admin-key-input" type="password" class="input" style="margin:0;flex:1;" value="' + state.adminKey + '" placeholder="Enter Admin Secret Key" />' +
+          '<input id="admin-key-input" type="password" class="input" style="margin:0;flex:1;" value="' + state.adminKey + '" placeholder="Enter Admin Secret Key" onkeydown="if(event.key===&#39;Enter&#39;)connectAdmin()" />' +
           '<button class="btn-gold" onclick="connectAdmin()">Connect</button>' +
         '</div>' +
         (state.adminError ? '<p style="color:#F87171;font-size:12px;margin:8px 0 0;">' + state.adminError + '</p>' : '') +
@@ -2021,8 +2039,12 @@ const APP_HTML = `<!doctype html>
       }
     }, 1000);
 
-    if (state.tab === 'admin') loadAdminDashboard();
-    loadDashboard();
+    if (state.tab === 'admin') {
+      render();
+      if (state.adminKey) loadAdminDashboard();
+    } else {
+      loadDashboard();
+    }
   </script>
 </body>
 </html>`;
