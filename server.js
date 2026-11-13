@@ -410,6 +410,7 @@ function parseTelegramUser(initData) {
     const tgUser = JSON.parse(userJson);
     if (!tgUser || !tgUser.id) return null;
 
+    // Optional HMAC signature check when BOT_TOKEN is set
     if (BOT_TOKEN && params.get('hash')) {
       const checkArr = [];
       for (const [k, v] of params.entries()) {
@@ -437,6 +438,7 @@ function parseTelegramUser(initData) {
 async function resolveUserFromReq(req) {
   if (dbLoadPromise) await dbLoadPromise.catch(() => {});
 
+  // 1. Check Bearer session token (Web Login)
   const auth = req.headers.authorization || '';
   if (auth.startsWith('Bearer ')) {
     const tok = auth.slice(7).trim();
@@ -444,6 +446,7 @@ async function resolveUserFromReq(req) {
     if (uid && usersMap.has(uid)) return usersMap.get(uid);
   }
 
+  // 2. Check Telegram Mini App initData
   const initData = req.headers['x-telegram-init-data'] || req.headers['x-telegram-webapp-data'] || '';
   const tg = parseTelegramUser(initData);
   if (tg) {
@@ -456,6 +459,7 @@ async function resolveUserFromReq(req) {
       return user;
     }
 
+    // Create new Telegram miner with 150.00 HERT Welcome Bonus
     user = {
       id: 'user_' + tg.telegramId,
       telegramId: tg.telegramId,
@@ -478,6 +482,7 @@ async function resolveUserFromReq(req) {
       createdAt: Date.now(),
     };
 
+    // Apply start_param invite code if present
     if (tg.startParam) {
       const code = tg.startParam.trim().toUpperCase();
       const inviter = usersMap.get('ref:' + code) || usersMap.get(code);
@@ -606,7 +611,6 @@ function buildPayload(user) {
       checklist,
       eligibleCount,
       totalChecks: checklist.length,
-      estimatedTokens: Number((user.pointsCents / 1000).toFixed(2)),
     },
   };
 }
@@ -825,9 +829,9 @@ app.post('/api/referrals/apply', async (req, res) => {
 app.post('/api/wallet/connect', async (req, res) => {
   const user = await resolveUserFromReq(req);
   const address = String(req.body?.address || '').trim();
-  const appName = String(req.body?.walletAppName || 'Tonkeeper').trim();
-  if (address.length < 10) {
-    return res.status(400).json({ error: 'Please enter a valid TON wallet address.' });
+  const appName = String(req.body?.walletAppName || 'TON Wallet').trim();
+  if (!/^(UQ|EQ|kQ|0Q)[A-Za-z0-9_-]{46}$/.test(address) && !/^0:[a-fA-F0-9]{64}$/.test(address)) {
+    return res.status(400).json({ error: 'Please connect a valid TON wallet address (starts with UQ or EQ, 48 characters).' });
   }
   user.wallet = { connected: true, address, appName };
   const pool = getPgPool();
@@ -956,87 +960,217 @@ const APP_HTML = `<!doctype html>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>HERT Mining — Telegram Mini App</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600;700;800&family=Outfit:wght@600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
   <style>
-    :root { --bg: #050807; --card: #0C120F; --card2: #111915; --gold: #D4AF37; --gold2: #E5C158; --green: #10B981; --green2: #34D399; --text: #F3F5F4; --muted: #8E9D96; --border: rgba(255,255,255,0.08); }
+    :root {
+      --bg: #000000;
+      --card: #0D1210;
+      --card2: #0A0E0C;
+      --gold: #D4AF37;
+      --gold2: #E5C158;
+      --green: #10B981;
+      --green2: #34D399;
+      --ton: #0098EA;
+      --text: #F3F5F4;
+      --muted: #8E9D96;
+      --border: rgba(255,255,255,0.08);
+    }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding-bottom: 84px; }
-    .wrap { max-width: 460px; margin: 0 auto; padding: 14px; }
-    .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000000;
+      color: var(--text);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      padding-bottom: 88px;
+      overflow-x: hidden;
+    }
+    .font-display { font-family: 'Outfit', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .wrap { max-width: 448px; margin: 0 auto; padding: 12px 16px 20px; }
+
+    /* Top Header */
+    .topbar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; }
     .brand { display: flex; align-items: center; gap: 10px; }
-    .logo { width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, #1E2418, #0D120E); border: 1px solid rgba(212,175,55,0.45); display: flex; align-items: center; justify-content: center; font-weight: 900; color: var(--gold2); font-size: 18px; }
-    .badge { background: rgba(212,175,55,0.16); color: var(--gold2); font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 99px; border: 1px solid rgba(212,175,55,0.3); }
-    .btn-ghost { background: rgba(255,255,255,0.05); border: 1px solid rgba(212,175,55,0.35); color: var(--gold2); font-size: 12px; font-weight: 700; padding: 7px 12px; border-radius: 99px; cursor: pointer; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 20px; padding: 16px; margin-bottom: 12px; }
-    .hero { background: linear-gradient(180deg, #141A16 0%, #090D0B 100%); border: 1px solid rgba(212,175,55,0.28); }
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .balance-val { font-family: ui-monospace, monospace; font-size: 34px; font-weight: 900; letter-spacing: -0.5px; margin: 6px 0 12px; }
-    .balance-unit { font-size: 13px; color: var(--gold); font-weight: 800; margin-left: 6px; }
-    .mine-box { background: rgba(5,8,7,0.8); border: 1px solid var(--border); border-radius: 16px; padding: 14px; }
-    .btn-gold { background: linear-gradient(135deg, #D4AF37, #E5C158); color: #050807; border: none; border-radius: 12px; padding: 11px 16px; font-weight: 800; font-size: 13px; cursor: pointer; }
-    .btn-green { background: var(--green); color: #050807; border: none; border-radius: 12px; padding: 10px 14px; font-weight: 800; font-size: 12px; cursor: pointer; }
-    .btn-dark { background: rgba(255,255,255,0.07); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; font-weight: 700; font-size: 12px; cursor: pointer; }
-    .btn-full { width: 100%; display: block; text-align: center; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 9999px;
+      background: linear-gradient(135deg, #16231C, #241F10);
+      border: 1px solid rgba(212,175,55,0.5);
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'Outfit', sans-serif; font-weight: 800; color: var(--gold2); font-size: 16px;
+      flex-shrink: 0;
+    }
+    .badge-ver { background: rgba(212,175,55,0.2); color: var(--gold2); font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 9999px; }
+    .badge { background: rgba(212,175,55,0.15); color: var(--gold2); font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 9999px; border: 1px solid rgba(212,175,55,0.28); white-space: nowrap; }
+    .badge-green { background: rgba(16,185,129,0.18); color: var(--green2); border: 1px solid rgba(16,185,129,0.35); }
+    .btn-pill-auth {
+      display: inline-flex; align-items: center; gap: 6px;
+      border-radius: 9999px; padding: 5px 11px; font-size: 12px; font-weight: 700; cursor: pointer;
+    }
+    .btn-pill-guest { border: 1px solid rgba(212,175,55,0.5); background: #1A160A; color: #E5C158; }
+    .btn-pill-synced { border: 1px solid rgba(16,185,129,0.4); background: #0C1914; color: #34D399; }
+
+    /* Cards & Hero */
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 24px; padding: 16px; margin-bottom: 14px; }
+    .hero {
+      position: relative; overflow: hidden;
+      background: linear-gradient(180deg, #141A16 0%, #0A0D0B 100%);
+      border: 1px solid rgba(212,175,55,0.25);
+      box-shadow: 0 20px 45px rgba(0,0,0,0.65);
+    }
+    .glow-tr { position: absolute; right: -32px; top: -32px; width: 130px; height: 130px; border-radius: 9999px; background: rgba(16,185,129,0.10); filter: blur(42px); pointer-events: none; }
+    .glow-bl { position: absolute; left: -32px; bottom: -32px; width: 130px; height: 130px; border-radius: 9999px; background: rgba(212,175,55,0.10); filter: blur(42px); pointer-events: none; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; position: relative; z-index: 2; }
+    .balance-row { display: flex; align-items: center; gap: 12px; margin: 12px 0 14px; position: relative; z-index: 2; }
+    .balance-val { font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 800; letter-spacing: -0.5px; color: #F3F5F4; line-height: 1; }
+    .balance-unit { font-size: 12px; color: var(--gold); font-weight: 800; margin-left: 6px; }
+    .mine-box { position: relative; z-index: 2; background: rgba(7,10,9,0.85); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 13px; }
+
+    /* Buttons */
+    .btn-gold { background: #D4AF37; color: #050807; border: none; border-radius: 12px; padding: 10px 16px; font-weight: 700; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    .btn-gold:hover { background: #E5C158; }
+    .btn-green { background: #10B981; color: #050807; border: none; border-radius: 12px; padding: 10px 14px; font-weight: 700; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    .btn-ton { background: #0098EA; color: #FFFFFF; border: none; border-radius: 16px; min-height: 48px; padding: 12px 16px; font-weight: 700; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 8px 20px rgba(0,152,234,0.22); }
+    .btn-dark { background: rgba(255,255,255,0.06); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; font-weight: 700; font-size: 12px; cursor: pointer; }
+    .btn-danger { background: rgba(127,29,29,0.22); color: #F87171; border: 1px solid rgba(239,68,68,0.3); border-radius: 12px; min-height: 44px; font-weight: 600; font-size: 12px; cursor: pointer; width: 100%; }
+    .btn-full { width: 100%; display: flex; align-items: center; justify-content: center; text-align: center; }
     .btn-disabled { opacity: 0.55; cursor: not-allowed; }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-    .tile { background: var(--card2); border: 1px solid var(--border); border-radius: 16px; padding: 13px; text-align: left; cursor: pointer; color: var(--text); }
+
+    /* Home Quick Tiles matching AI Studio */
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+    .tile-gold { background: #0E1410; border: 1px solid rgba(212,175,55,0.30); border-radius: 18px; padding: 13px; text-align: left; cursor: pointer; color: var(--text); }
+    .tile-green { background: #0C1713; border: 1px solid rgba(16,185,129,0.30); border-radius: 18px; padding: 13px; text-align: left; cursor: pointer; color: var(--text); }
+    .icon-box { width: 32px; height: 32px; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .ib-gold { background: rgba(212,175,55,0.15); color: #E5C158; }
+    .ib-green { background: rgba(16,185,129,0.15); color: #34D399; }
+    .ib-blue { background: #111A24; color: #60A5FA; }
+    .ib-wallet { width: 46px; height: 46px; border-radius: 16px; background: #0C1524; border: 1px solid rgba(59,130,246,0.4); color: #60A5FA; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+    .invite-banner {
+      background: linear-gradient(90deg, #0C1A14 0%, #08120E 100%);
+      border: 1px solid rgba(16,185,129,0.30);
+      border-radius: 18px; padding: 12px 14px; margin-bottom: 14px;
+    }
+    .nav-list-card { background: #0A0E0C; border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 6px; margin-bottom: 14px; }
+    .nav-list-item { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; border-radius: 12px; padding: 10px; color: var(--text); text-align: left; cursor: pointer; }
+    .nav-list-item:hover { background: rgba(255,255,255,0.04); }
+
+    .wallet-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+    .wallet-tile {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #070A09; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px;
+      padding: 10px 6px; color: var(--text); cursor: pointer;
+    }
+    .wallet-tile:hover { border-color: rgba(0,152,234,0.5); }
+
     .muted { color: var(--muted); font-size: 12px; margin: 0; }
     .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--muted); font-weight: 700; }
-    .progress-track { height: 7px; border-radius: 99px; background: rgba(255,255,255,0.08); overflow: hidden; margin: 8px 0; }
-    .progress-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--gold)); transition: width 0.5s; }
-    .nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(9,13,11,0.96); backdrop-filter: blur(12px); border-top: 1px solid var(--border); display: flex; justify-content: space-around; align-items: center; padding: 8px 6px 12px; z-index: 50; }
-    .nav-btn { background: none; border: none; color: var(--muted); font-size: 11px; font-weight: 700; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; min-width: 56px; }
-    .nav-btn.active { color: var(--gold2); }
-    .spin-fab { width: 46px; height: 46px; border-radius: 50%; background: linear-gradient(135deg, #D4AF37, #E5C158); color: #050807; border: none; font-size: 20px; display: flex; align-items: center; justify-content: center; margin-top: -18px; box-shadow: 0 4px 18px rgba(212,175,55,0.4); cursor: pointer; }
+    .progress-track { height: 6px; border-radius: 99px; background: rgba(255,255,255,0.06); overflow: hidden; margin: 8px 0; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #10B981, #D4AF37); transition: width 0.5s; }
+
+    /* Bottom Navigation */
+    .nav {
+      position: fixed; bottom: 0; left: 0; right: 0; height: 66px;
+      background: rgba(7,10,9,0.95); backdrop-filter: blur(18px);
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex; justify-content: space-around; align-items: center; padding: 0 8px; z-index: 50;
+    }
+    .nav-btn {
+      position: relative; flex: 1; background: none; border: none; color: #8E9D96;
+      font-size: 11px; font-weight: 600; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 4px; cursor: pointer; padding: 6px 0;
+    }
+    .nav-btn.active { color: #E5C158; font-weight: 700; }
+    .nav-btn.active::after { content: ''; position: absolute; bottom: -2px; width: 16px; height: 2px; border-radius: 99px; background: #D4AF37; }
+    .spin-wrap { position: relative; display: flex; flex-direction: column; align-items: center; margin-top: -16px; background: none; border: none; cursor: pointer; padding: 0 8px; }
+    .spin-fab {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(45deg, #D4AF37, #F3E3A8); color: #070A09;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 16px rgba(212,175,55,0.4);
+    }
+    .spin-lbl { margin-top: 3px; font-size: 10px; font-weight: 700; color: #E5C158; }
+
     .pills { display: flex; gap: 6px; margin-bottom: 12px; overflow-x: auto; }
-    .pill { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 7px 12px; border-radius: 10px; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
-    .pill.active { background: rgba(212,175,55,0.18); border-color: var(--gold); color: var(--gold2); }
-    .task-card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 13px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .pill { background: #0D1210; border: 1px solid var(--border); color: var(--muted); padding: 8px 12px; border-radius: 12px; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+    .pill.active { background: #18231E; border-color: rgba(212,175,55,0.45); color: #E5C158; }
+    .seg-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; background: #0D1210; border: 1px solid var(--border); border-radius: 16px; padding: 4px; margin-bottom: 14px; }
+    .seg-btn { background: none; border: none; color: #8E9D96; border-radius: 12px; padding: 9px 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .seg-btn.active { background: #18231E; color: #E5C158; }
+
+    .task-card { background: #0D1210; border: 1px solid var(--border); border-radius: 18px; padding: 14px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .day-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
-    .day-box { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 10px 6px; text-align: center; font-size: 11px; }
+    .day-box { background: #070A09; border: 1px solid var(--border); border-radius: 12px; padding: 10px 6px; text-align: center; font-size: 11px; }
     .day-box.active { border-color: var(--green); background: rgba(16,185,129,0.14); }
-    .input { width: 100%; background: #070A09; border: 1px solid var(--border); color: var(--text); border-radius: 12px; padding: 11px 12px; font-size: 13px; margin-bottom: 10px; }
-    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.78); display: none; align-items: center; justify-content: center; padding: 18px; z-index: 100; }
+    .input { width: 100%; background: #070A09; border: 1px solid rgba(255,255,255,0.1); color: var(--text); border-radius: 12px; padding: 11px 12px; font-size: 12px; margin-bottom: 10px; }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.82); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; padding: 18px; z-index: 100; }
     .modal-bg.open { display: flex; }
-    .modal { width: 100%; max-width: 380px; background: #0E1411; border: 1px solid rgba(212,175,55,0.35); border-radius: 22px; padding: 20px; }
-    .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); background: #13221C; border: 1px solid var(--green); color: #fff; padding: 10px 16px; border-radius: 12px; font-size: 12px; font-weight: 700; z-index: 200; display: none; max-width: 90%; text-align: center; }
+    .modal { width: 100%; max-width: 380px; background: #0D1210; border: 1px solid rgba(212,175,55,0.35); border-radius: 24px; padding: 20px; }
+    .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); background: #16140D; border: 1px solid rgba(212,175,55,0.5); color: #F6E2A8; padding: 10px 16px; border-radius: 16px; font-size: 12px; font-weight: 600; z-index: 200; display: none; max-width: 90%; text-align: center; box-shadow: 0 12px 30px rgba(0,0,0,0.6); }
     .wheel-circle { width: 130px; height: 130px; margin: 16px auto; border-radius: 50%; border: 4px solid var(--gold); background: conic-gradient(#14241C 0 60deg, #1E2414 60deg 120deg, #102A20 120deg 180deg, #272110 180deg 240deg, #12231B 240deg 300deg, #292211 300deg 360deg); display: flex; align-items: center; justify-content: center; font-size: 32px; transition: transform 1.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
-    .check-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .check-row { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 12px; }
     .check-row:last-child { border-bottom: none; }
+    .dot-live { display: inline-block; width: 7px; height: 7px; border-radius: 99px; background: #10B981; margin-right: 6px; }
   </style>
 </head>
 <body>
   <div id="toast" class="toast"></div>
 
   <div class="wrap">
-    <div class="topbar">
+    <header class="topbar">
       <div class="brand">
         <div class="logo">H</div>
         <div>
           <div style="display:flex;align-items:center;gap:6px;">
-            <strong style="font-size:15px;">HERT</strong>
-            <span class="badge">v2.0</span>
+            <strong class="font-display" style="font-size:14px;color:#F3F5F4;">HERT</strong>
+            <span class="badge-ver">v2.0</span>
           </div>
-          <p id="hdr-user" class="muted" style="font-size:11px;">Loading miner...</p>
+          <p id="hdr-user" class="muted" style="font-size:10px;">Loading miner...</p>
         </div>
       </div>
-      <button id="btn-auth-modal" class="btn-ghost" onclick="openAuthModal()">Web Login</button>
-    </div>
+      <button id="btn-auth-modal" class="btn-pill-auth btn-pill-guest" onclick="openAuthModal()">
+        <span>🌐</span><span id="auth-btn-lbl">Web Login</span>
+      </button>
+    </header>
 
     <div id="view-root"></div>
   </div>
 
+  <!-- Telegram 5-Tab Bottom Navigation Bar -->
   <nav class="nav">
-    <button class="nav-btn active" data-tab="home" onclick="switchTab('home')"><span>⛏️</span><span>Mine</span></button>
-    <button class="nav-btn" data-tab="tasks" onclick="switchTab('tasks')"><span>📋</span><span>Tasks</span></button>
-    <button class="spin-fab" onclick="openWheelModal()" title="Daily Lucky Wheel">✨</button>
-    <button class="nav-btn" data-tab="friends" onclick="switchTab('friends')"><span>👥</span><span>Friends</span></button>
-    <button class="nav-btn" data-tab="airdrop" onclick="switchTab('airdrop')"><span>💎</span><span>Airdrop</span></button>
+    <button class="nav-btn active" data-tab="home" onclick="switchTab('home')">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 17.5 3 6V3h3l11.5 11.5"/><path d="M13 19l6-6"/><path d="M16 16l4 4"/><path d="M19 21l2-2"/></svg>
+      <span>Mine</span>
+    </button>
+    <button class="nav-btn" data-tab="tasks" onclick="switchTab('tasks')">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <span>Tasks</span>
+    </button>
+    <button class="spin-wrap" onclick="openWheelModal()" title="Daily Lucky Wheel">
+      <div class="spin-fab">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+      </div>
+      <span class="spin-lbl">Spin</span>
+    </button>
+    <button class="nav-btn" data-tab="friends" onclick="switchTab('friends')">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>Friends</span>
+    </button>
+    <button class="nav-btn" data-tab="airdrop" onclick="switchTab('airdrop')">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>
+      <span>Airdrop</span>
+    </button>
   </nav>
 
+  <!-- Lucky Wheel Modal -->
   <div id="wheel-modal" class="modal-bg">
     <div class="modal" style="text-align:center;">
-      <h3 style="margin:0 0 4px;">Daily Lucky Wheel</h3>
+      <h3 class="font-display" style="margin:0 0 4px;">Daily Lucky Wheel</h3>
       <p class="muted">Spin once every 24h to win up to 25.00 HERT!</p>
       <div id="wheel-disc" class="wheel-circle">🎁</div>
       <p id="wheel-result" style="font-weight:800;color:var(--gold2);min-height:20px;margin:8px 0;"></p>
@@ -1045,10 +1179,11 @@ const APP_HTML = `<!doctype html>
     </div>
   </div>
 
+  <!-- Web Login / Recover Account Modal -->
   <div id="auth-modal" class="modal-bg">
     <div class="modal">
       <div class="row" style="margin-bottom:12px;">
-        <h3 style="margin:0;">Account & Recovery</h3>
+        <h3 class="font-display" style="margin:0;">Account &amp; Sync</h3>
         <button class="btn-dark" style="padding:5px 10px;" onclick="closeModal('auth-modal')">✕</button>
       </div>
       <div class="pills">
@@ -1062,24 +1197,25 @@ const APP_HTML = `<!doctype html>
     </div>
   </div>
 
+  <!-- Connect Wallet Fallback Modal -->
   <div id="wallet-modal" class="modal-bg">
     <div class="modal">
       <div class="row" style="margin-bottom:10px;">
-        <h3 style="margin:0;">Connect TON Wallet</h3>
+        <h3 class="font-display" style="margin:0;">Connect TON Wallet</h3>
         <button class="btn-dark" style="padding:5px 10px;" onclick="closeModal('wallet-modal')">✕</button>
       </div>
-      <p class="muted" style="margin-bottom:10px;">Choose a TON wallet or paste your non-custodial TON address (UQ... / EQ...):</p>
-      <input id="wallet-addr-input" class="input" placeholder="UQ... or EQ... TON address" />
-      <div class="grid2">
-        <button class="btn-gold" onclick="quickWallet('Tonkeeper')">Tonkeeper</button>
-        <button class="btn-green" onclick="quickWallet('Telegram Wallet')">TG @wallet</button>
+      <p class="muted" style="margin-bottom:12px;">Connect your non-custodial TON wallet via TON Connect 2.0 or paste your real TON address below:</p>
+      <button class="btn-ton btn-full" style="margin-bottom:10px;" onclick="openTonConnect()">Open TON Connect (Tonkeeper / TG @wallet)</button>
+      <div style="border-top:1px solid var(--border);padding-top:10px;margin-top:6px;">
+        <span class="label" style="display:block;margin-bottom:6px;">Or Enter Your TON Address Manually</span>
+        <input id="wallet-addr-input" class="input font-mono" placeholder="UQ... or EQ... (48 characters)" />
+        <button class="btn-gold btn-full" onclick="connectManualWallet('wallet-addr-input')">Save TON Address</button>
       </div>
-      <button class="btn-dark btn-full" style="margin-top:8px;" onclick="connectManualWallet()">Save Entered Address</button>
     </div>
   </div>
 
   <script>
-    var state = { tab: 'home', taskFilter: 'all', authMode: 'login', data: null, wheelDeg: 0 };
+    var state = { tab: 'home', taskFilter: 'all', authMode: 'login', airdropSub: 'eligibility', showManualWallet: false, data: null, wheelDeg: 0 };
     var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
     if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
 
@@ -1087,7 +1223,7 @@ const APP_HTML = `<!doctype html>
       var el = document.getElementById('toast');
       el.textContent = msg;
       el.style.display = 'block';
-      setTimeout(function() { el.style.display = 'none'; }, 3200);
+      setTimeout(function() { el.style.display = 'none'; }, 3500);
     }
 
     function fmt(cents) {
@@ -1100,13 +1236,18 @@ const APP_HTML = `<!doctype html>
       return h + 'h ' + String(m).padStart(2, '0') + 'm ' + String(sec).padStart(2, '0') + 's';
     }
 
+    function shortAddr(addr) {
+      if (!addr || addr.length < 14) return addr || '';
+      return addr.slice(0, 6) + '...' + addr.slice(-6);
+    }
+
     function leagueFor(cents) {
       var hert = (cents || 0) / 100;
-      if (hert >= 5000) return '💎 Diamond Miner';
-      if (hert >= 1500) return '🏆 Platinum Miner';
-      if (hert >= 500) return '🥇 Gold Miner';
-      if (hert >= 250) return '🥈 Silver Miner';
-      return '🛡️ Bronze Miner';
+      if (hert >= 5000) return '💎 Diamond';
+      if (hert >= 1500) return '🏆 Platinum';
+      if (hert >= 500) return '🥇 Gold';
+      if (hert >= 250) return '🥈 Silver';
+      return '🛡️ Bronze';
     }
 
     function getTgInitData() {
@@ -1164,8 +1305,11 @@ const APP_HTML = `<!doctype html>
       var d = state.data;
       if (!d) return;
       var u = d.user;
-      document.getElementById('hdr-user').textContent = (u.firstName || 'Miner') + (u.username ? ' (@' + u.username + ')' : '');
-      document.getElementById('btn-auth-modal').textContent = d.isGuest ? 'Web Login' : 'Account';
+      document.getElementById('hdr-user').textContent = u.firstName || 'Miner';
+      var authBtn = document.getElementById('btn-auth-modal');
+      var authLbl = document.getElementById('auth-btn-lbl');
+      authBtn.className = 'btn-pill-auth ' + (d.isGuest ? 'btn-pill-guest' : 'btn-pill-synced');
+      authLbl.textContent = d.isGuest ? 'Web Login' : 'Coins Synced';
 
       var root = document.getElementById('view-root');
       if (state.tab === 'home') root.innerHTML = renderHome(d);
@@ -1181,47 +1325,63 @@ const APP_HTML = `<!doctype html>
       var mineHtml = '';
       if (s) {
         mineHtml = '<div class="mine-box">' +
-          '<div class="row"><span style="color:var(--green2);font-weight:800;font-size:12px;">● Mining Active (' + fmt(s.rateCentsPerHour) + ' HERT/hr)</span>' +
-          '<span style="font-family:monospace;font-weight:800;color:var(--gold2);">+' + fmt(s.accruedCents) + ' HERT</span></div>' +
+          '<div class="row"><span style="color:#34D399;font-weight:700;font-size:12px;"><span class="dot-live"></span>Mining Active <span class="muted">(' + fmt(s.rateCentsPerHour) + ' HERT/h)</span></span>' +
+          '<span class="font-mono" style="font-weight:800;font-size:12px;color:#E5C158;">+' + fmt(s.accruedCents) + ' HERT</span></div>' +
           '<div class="progress-track"><div class="progress-fill" style="width:' + Math.round(s.progressPercent) + '%"></div></div>' +
-          '<div class="row"><span class="muted">Ends in ' + fmtTime(s.remainingMs) + '</span>' +
+          '<div class="row"><span class="muted" style="font-size:11px;">Ends in: ' + fmtTime(s.remainingMs) + '</span>' +
           (s.canClaim
-            ? '<button class="btn-green" onclick="harvestMining()">Harvest Now</button>'
-            : '<span class="muted">Unlock in ' + s.unlockRemainingSec + 's</span>') +
+            ? '<button style="background:none;border:none;color:#10B981;font-weight:700;font-size:12px;cursor:pointer;padding:0;" onclick="harvestMining()">Harvest Now</button>'
+            : '<span class="muted" style="font-size:11px;">Min. 1m (' + s.unlockRemainingSec + 's)</span>') +
           '</div></div>';
       } else {
         mineHtml = '<div class="mine-box"><div class="row">' +
-          '<div><strong style="font-size:13px;">Miner is Idle</strong><p class="muted">Rate: ' + fmt(m.effectiveRateCentsPerHour) + ' HERT/hr (4h cycle)</p></div>' +
-          '<button class="btn-gold" onclick="startMining()">⛏️ Start Mining</button>' +
+          '<div><strong style="font-size:12px;color:#F3F5F4;">Miner is Idle</strong><p class="muted" style="font-size:11px;">Rate: ' + fmt(m.effectiveRateCentsPerHour) + ' HERT/hr (4h cycle)</p></div>' +
+          '<button class="btn-gold" onclick="startMining()">⛏ Start Mining</button>' +
           '</div></div>';
       }
 
       return '<div class="card hero">' +
-        '<div class="row"><span class="label">Total Balance</span><span class="badge">' + leagueFor(d.user.pointsCents) + '</span></div>' +
-        '<div class="balance-val">' + fmt(d.user.pointsCents) + '<span class="balance-unit">HERT</span></div>' +
+        '<div class="glow-tr"></div><div class="glow-bl"></div>' +
+        '<div class="row"><span class="label"><span class="dot-live"></span>Total Balance</span><span class="badge">' + leagueFor(d.user.pointsCents) + '</span></div>' +
+        '<div class="balance-row">' +
+          '<div class="logo" style="width:38px;height:38px;font-size:18px;">H</div>' +
+          '<div><span class="balance-val">' + fmt(d.user.pointsCents) + '</span><span class="balance-unit">HERT</span></div>' +
+        '</div>' +
         mineHtml +
       '</div>' +
       '<div class="grid2">' +
-        '<button class="tile" onclick="openWheelModal()">' +
-          '<div class="row"><span style="font-size:20px;">✨</span><span class="badge">' + (d.luckyWheel.canSpin ? 'Free Spin' : 'Cooldown') + '</span></div>' +
-          '<div style="margin-top:8px;"><strong style="font-size:13px;">Daily Lucky Wheel</strong><p class="muted">Win up to 25.00 HERT</p></div>' +
+        '<button class="tile-gold" onclick="openWheelModal()">' +
+          '<div class="row"><div class="icon-box ib-gold">✨</div><span class="badge" style="font-size:10px;padding:2px 8px;">' + (d.luckyWheel.canSpin ? 'Free Spin' : 'Cooldown') + '</span></div>' +
+          '<div style="margin-top:10px;"><strong style="font-size:12px;display:block;">Daily Lucky Wheel</strong><p class="muted" style="font-size:11px;">Win up to 25.00 HERT</p></div>' +
         '</button>' +
-        '<button class="tile" onclick="switchTab(\\'checkin\\')">' +
-          '<div class="row"><span style="font-size:20px;">📅</span><span style="color:var(--green2);font-weight:800;font-size:12px;">🔥 Day ' + d.checkIn.streakDay + '</span></div>' +
-          '<div style="margin-top:8px;"><strong style="font-size:13px;">Daily Check-In</strong><p class="muted">' + (d.checkIn.canCheckIn ? 'Claim Bonus Now!' : 'Streak Active') + '</p></div>' +
+        '<button class="tile-green" onclick="switchTab(\\'checkin\\')">' +
+          '<div class="row"><div class="icon-box ib-green">📅</div><span style="color:#34D399;font-weight:700;font-size:11px;">🔥 Day ' + d.checkIn.streakDay + '</span></div>' +
+          '<div style="margin-top:10px;"><strong style="font-size:12px;display:block;">Daily Check-In</strong><p class="muted" style="font-size:11px;">' + (d.checkIn.canCheckIn ? 'Claim Reward Now!' : 'Streak Active') + '</p></div>' +
         '</button>' +
       '</div>' +
-      '<div class="card" style="background:linear-gradient(90deg,#0C1A14,#09120E);border-color:rgba(16,185,129,0.3);">' +
+      '<div class="invite-banner">' +
         '<div class="row">' +
-          '<div><strong style="font-size:13px;">Invite Friends &nbsp;<span style="color:var(--green2);">+50.00 HERT</span></strong>' +
-          '<p class="muted">' + d.referrals.invitedCount + ' friends invited so far</p></div>' +
+          '<div style="display:flex;align-items:center;gap:10px;">' +
+            '<div class="icon-box ib-green">👥</div>' +
+            '<div><strong style="font-size:12px;">Invite Friends &nbsp;<span class="badge badge-green" style="font-size:10px;padding:2px 7px;">+50.00 HERT</span></strong>' +
+            '<p class="muted" style="font-size:11px;">' + d.referrals.invitedCount + ' friends invited so far</p></div>' +
+          '</div>' +
           '<button class="btn-green" onclick="switchTab(\\'friends\\')">Invite →</button>' +
         '</div>' +
       '</div>' +
-      '<div class="card" style="padding:8px 14px;">' +
-        '<div class="check-row" style="cursor:pointer;" onclick="switchTab(\\'checkin\\')"><span>📅 7-Day Daily Streak Calendar</span><span class="muted">→</span></div>' +
-        '<div class="check-row" style="cursor:pointer;" onclick="switchTab(\\'friends\\')"><span>👥 Referral Guild (+50.00 HERT)</span><span class="muted">→</span></div>' +
-        '<div class="check-row" style="cursor:pointer;" onclick="switchTab(\\'airdrop\\')"><span>💎 TON Wallet & Airdrop Readiness</span><span class="muted">→</span></div>' +
+      '<div class="nav-list-card">' +
+        '<button class="nav-list-item" onclick="switchTab(\\'checkin\\')">' +
+          '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-green">📅</div><div><strong style="font-size:12px;display:block;">7-Day Streak Calendar</strong><span class="muted" style="font-size:10px;">Claim daily HERT rewards</span></div></div>' +
+          '<span class="muted">›</span>' +
+        '</button>' +
+        '<button class="nav-list-item" onclick="switchTab(\\'friends\\')">' +
+          '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-green">👥</div><div><strong style="font-size:12px;display:block;">Referral Guild</strong><span class="muted" style="font-size:10px;">' + d.referrals.invitedCount + ' invited • +50.00 HERT per referral</span></div></div>' +
+          '<span class="muted">›</span>' +
+        '</button>' +
+        '<button class="nav-list-item" onclick="switchTab(\\'airdrop\\')">' +
+          '<div style="display:flex;align-items:center;gap:10px;"><div class="icon-box ib-blue">💎</div><div><strong style="font-size:12px;display:block;">TON Wallet &amp; Airdrop</strong><span class="muted" style="font-size:10px;">' + (d.wallet.connected ? 'TON Connected' : 'Connect for Airdrop eligibility') + '</span></div></div>' +
+          '<span class="muted">›</span>' +
+        '</button>' +
       '</div>';
     }
 
@@ -1234,19 +1394,19 @@ const APP_HTML = `<!doctype html>
       var doneCount = d.tasks.filter(function(t) { return t.status === 'claimed'; }).length;
 
       var html = '<div style="margin-bottom:12px;">' +
-        '<h2 style="margin:0 0 4px;font-size:20px;">Earn HERT Rewards</h2>' +
+        '<h2 class="font-display" style="margin:0 0 4px;font-size:20px;">Earn HERT Rewards</h2>' +
         '<p class="muted">Complete verified community missions (' + doneCount + '/' + d.tasks.length + ' completed)</p>' +
       '</div>' +
       '<div class="pills">' +
         '<button class="pill ' + (state.taskFilter==='all'?'active':'') + '" onclick="state.taskFilter=\\'all\\';render()">All (' + d.tasks.length + ')</button>' +
-        '<button class="pill ' + (state.taskFilter==='social'?'active':'') + '" onclick="state.taskFilter=\\'social\\';render()">Social & Milestones</button>' +
+        '<button class="pill ' + (state.taskFilter==='social'?'active':'') + '" onclick="state.taskFilter=\\'social\\';render()">Social &amp; Milestones</button>' +
         '<button class="pill ' + (state.taskFilter==='partner'?'active':'') + '" onclick="state.taskFilter=\\'partner\\';render()">Partners</button>' +
       '</div>';
 
       list.forEach(function(t) {
         var btn = '';
         if (t.status === 'claimed') {
-          btn = '<span class="badge" style="background:rgba(16,185,129,0.2);color:var(--green2);border-color:rgba(16,185,129,0.4);">✓ Claimed</span>';
+          btn = '<span class="badge badge-green">✓ Claimed</span>';
         } else if (t.status === 'ready_to_claim') {
           btn = '<button class="btn-green" onclick="claimTask(\\'' + t.id + '\\')">Claim +' + fmt(t.rewardCents) + '</button>';
         } else if (t.status === 'verifying') {
@@ -1256,9 +1416,9 @@ const APP_HTML = `<!doctype html>
         }
         html += '<div class="task-card">' +
           '<div style="flex:1;min-width:0;">' +
-            '<strong style="font-size:13px;display:block;">' + t.title + '</strong>' +
+            '<strong style="font-size:13px;display:block;color:#F3F5F4;">' + t.title + '</strong>' +
             '<p class="muted" style="font-size:11px;margin:3px 0;">' + t.description + '</p>' +
-            '<span style="font-size:11px;font-weight:800;color:var(--gold2);">+' + fmt(t.rewardCents) + ' HERT</span>' +
+            '<span class="font-mono" style="font-size:11px;font-weight:700;color:#E5C158;">+' + fmt(t.rewardCents) + ' HERT</span>' +
           '</div>' +
           '<div>' + btn + '</div>' +
         '</div>';
@@ -1274,11 +1434,11 @@ const APP_HTML = `<!doctype html>
         var active = dayNum === ci.streakDay;
         boxes += '<div class="day-box ' + (active ? 'active' : '') + '">' +
           '<div class="muted">Day ' + dayNum + '</div>' +
-          '<strong style="color:var(--gold2);font-size:12px;">+' + fmt(r) + '</strong>' +
+          '<strong class="font-mono" style="color:var(--gold2);font-size:12px;">+' + fmt(r) + '</strong>' +
         '</div>';
       });
-      return '<div class="card">' +
-        '<div class="row"><h2 style="margin:0;font-size:18px;">Daily Check-In</h2><span class="badge">🔥 Streak Day ' + ci.streakDay + '</span></div>' +
+      return '<div class="card hero">' +
+        '<div class="row"><h2 class="font-display" style="margin:0;font-size:18px;">Daily Check-In</h2><span class="badge">🔥 Streak Day ' + ci.streakDay + '</span></div>' +
         '<p class="muted" style="margin-top:4px;">Check in every 24h to grow your 7-day HERT reward streak.</p>' +
         '<div class="day-grid">' + boxes + '</div>' +
         (ci.canCheckIn
@@ -1297,19 +1457,19 @@ const APP_HTML = `<!doctype html>
         r.friends.forEach(function(f) {
           friendsHtml += '<div class="check-row"><span><strong>' + (f.firstName || 'Miner') + '</strong>' +
             (f.username ? ' <span class="muted">@' + f.username + '</span>' : '') +
-            '</span><span style="color:var(--green2);font-weight:800;">+50.00 HERT</span></div>';
+            '</span><span style="color:var(--green2);font-weight:700;">+50.00 HERT</span></div>';
         });
       }
-      return '<div class="card" style="text-align:center;">' +
+      return '<div class="card hero" style="text-align:center;">' +
         '<div style="font-size:28px;">👥</div>' +
-        '<h2 style="margin:6px 0;">Invite Friends & Earn</h2>' +
-        '<p class="muted" style="margin-bottom:14px;">Get <strong style="color:var(--gold2);">+50.00 HERT</strong> for every friend invited + +0.50 HERT/hr mining speed boost!</p>' +
+        '<h2 class="font-display" style="margin:6px 0;">Invite Friends &amp; Earn</h2>' +
+        '<p class="muted" style="margin-bottom:14px;">Get <strong style="color:#E5C158;">+50.00 HERT</strong> for every friend invited + +0.50 HERT/hr mining boost!</p>' +
         '<button class="btn-gold btn-full" onclick="shareTg()">🚀 Share on Telegram (+50.00 HERT)</button>' +
         '<button class="btn-dark btn-full" style="margin-top:8px;" onclick="copyText(\\'' + r.telegramDeepLink + '\\', \\'Invite link copied!\\')">Copy Invite Link</button>' +
       '</div>' +
       '<div class="card">' +
         '<span class="label">Your Referral Code</span>' +
-        '<div class="row" style="margin-top:6px;"><strong style="font-family:monospace;font-size:18px;">' + r.referralCode + '</strong>' +
+        '<div class="row" style="margin-top:6px;"><strong class="font-mono" style="font-size:18px;">' + r.referralCode + '</strong>' +
         '<button class="btn-dark" onclick="copyText(\\'' + r.referralCode + '\\', \\'Referral code copied!\\')">Copy Code</button></div>' +
       '</div>' +
       (!d.user.referredBy ? '<div class="card"><span class="label">Have an Invite Code? (+50.00 HERT)</span><div class="row" style="margin-top:8px;">' +
@@ -1320,31 +1480,98 @@ const APP_HTML = `<!doctype html>
 
     function renderAirdrop(d) {
       var w = d.wallet, a = d.airdrop;
-      var checksHtml = '';
-      a.checklist.forEach(function(c) {
-        checksHtml += '<div class="check-row"><span>' + c.label + '</span>' +
-          '<span style="font-weight:800;color:' + (c.done ? 'var(--green2)' : 'var(--muted)') + ';">' + (c.done ? '✓ Ready' : 'Pending') + '</span></div>';
-      });
-      return '<div class="card">' +
-        '<span class="label">TON Wallet Connection</span>' +
-        '<p class="muted" style="margin:6px 0 12px;">Connect your non-custodial TON wallet directly to receive your airdrop allocation on TGE.</p>' +
+      var score = Math.round((a.eligibleCount / Math.max(1, a.totalChecks)) * 100);
+      var circ = 2 * Math.PI * 26;
+      var offset = circ * (1 - score / 100);
+
+      var walletCard = '<div class="card hero">' +
+        '<div class="row">' +
+          '<div style="display:flex;align-items:center;gap:12px;">' +
+            '<div class="ib-wallet">💎</div>' +
+            '<div><span class="label" style="font-size:10px;">TON Blockchain</span><h2 class="font-display" style="margin:2px 0 0;font-size:17px;">' + (w.connected ? 'TON Wallet Linked' : 'Connect TON Wallet') + '</h2></div>' +
+          '</div>' +
+          (w.connected ? '<span class="badge badge-green">✓ Verified</span>' : '<span class="badge">TON Connect 2.0</span>') +
+        '</div>' +
         (w.connected
-          ? '<div class="mine-box"><div class="row"><strong style="color:var(--green2);">✓ ' + (w.appName || 'TON Wallet') + ' Connected</strong>' +
-            '<button class="btn-dark" onclick="disconnectWallet()">Disconnect</button></div>' +
-            '<p style="font-family:monospace;font-size:12px;margin:8px 0 0;word-break:break-all;">' + w.address + '</p></div>'
-          : '<div class="mine-box" style="margin-bottom:10px;"><span style="font-family:monospace;color:var(--muted);font-size:13px;">Not Connected</span></div>' +
-            '<button class="btn-gold btn-full" onclick="openModal(\\'wallet-modal\\')">💎 Connect TON Wallet</button>') +
-      '</div>' +
-      '<div class="card hero">' +
-        '<div class="row"><span class="label">Estimated Airdrop Allocation</span><span class="badge">' + a.eligibleCount + '/' + a.totalChecks + ' Eligible</span></div>' +
-        '<div class="balance-val" style="font-size:28px;">' + a.estimatedTokens.toLocaleString('en-US', { minimumFractionDigits: 2 }) + '<span class="balance-unit">TOKENS</span></div>' +
-        '<p class="muted">Based on your ' + fmt(d.user.pointsCents) + ' HERT mined balance</p>' +
-      '</div>' +
-      '<div class="card"><strong style="font-size:14px;display:block;margin-bottom:6px;">Airdrop Eligibility Checklist</strong>' + checksHtml + '</div>';
+          ? '<div class="mine-box" style="margin-top:14px;">' +
+              '<div class="row"><span class="muted">Connected App:</span><strong style="color:#34D399;font-size:12px;">' + (w.appName || 'TON Wallet') + '</strong></div>' +
+              '<div class="row" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">' +
+                '<div><span class="muted" style="font-size:10px;">Address:</span><p class="font-mono" style="margin:2px 0 0;font-size:12px;font-weight:700;">' + shortAddr(w.address) + '</p></div>' +
+                '<button class="btn-dark" style="color:#D4AF37;padding:6px 10px;" onclick="copyText(\\'' + w.address + '\\', \\'Address copied!\\')">Copy</button>' +
+              '</div>' +
+            '</div>' +
+            '<button class="btn-danger" style="margin-top:12px;" onclick="disconnectWallet()">Disconnect Wallet</button>'
+          : '<p class="muted" style="margin:12px 0;">Connect your non-custodial TON wallet securely via TON Connect 2.0 (Tonkeeper, Telegram Wallet, or MyTonWallet).</p>' +
+            '<button class="btn-ton btn-full" onclick="openTonConnect()">💎 Connect TON Wallet</button>' +
+            '<div class="wallet-grid">' +
+              '<button class="wallet-tile" onclick="openTonConnect(\\'tonkeeper\\')"><strong style="font-size:11px;">Tonkeeper</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(\\'telegram-wallet\\')"><strong style="font-size:11px;">TG @wallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+              '<button class="wallet-tile" onclick="openTonConnect(\\'mytonwallet\\')"><strong style="font-size:11px;">MyTonWallet</strong><span style="font-size:9px;color:#34D399;">TON Connect</span></button>' +
+            '</div>' +
+            '<div style="margin-top:10px;">' +
+              '<button style="background:none;border:none;color:#8E9D96;font-size:11px;font-weight:600;cursor:pointer;padding:2px 0;" onclick="state.showManualWallet=!state.showManualWallet;render()">' +
+                (state.showManualWallet ? 'Hide manual address input' : 'Or enter your TON address manually') +
+              '</button>' +
+              (state.showManualWallet
+                ? '<div style="margin-top:8px;"><input id="inline-wallet-input" class="input font-mono" placeholder="Paste UQ... or EQ... TON wallet address" />' +
+                  '<button class="btn-gold btn-full" onclick="connectManualWallet(\\'inline-wallet-input\\')">Save TON Address</button></div>'
+                : '') +
+            '</div>') +
+      '</div>';
+
+      var hubBanner = '<div class="card hero" style="border-color:rgba(212,175,55,0.35);">' +
+        '<div class="row">' +
+          '<div style="flex:1;">' +
+            '<span class="badge badge-green" style="font-size:11px;">✨ Phase 1 Community Airdrop</span>' +
+            '<h2 class="font-display" style="margin:8px 0 4px;font-size:20px;">Airdrop Eligibility Hub</h2>' +
+            '<p class="muted">Complete the verification criteria below to qualify for the on-chain $HERT distribution on the TON blockchain.</p>' +
+          '</div>' +
+          '<div style="background:#141C18;border:1px solid rgba(255,255,255,0.08);border-radius:16px;padding:10px;text-align:center;min-width:86px;">' +
+            '<div style="position:relative;width:60px;height:60px;margin:0 auto;display:flex;align-items:center;justify-content:center;">' +
+              '<svg width="60" height="60" style="transform:rotate(-90deg);"><circle cx="30" cy="30" r="26" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="5"/><circle cx="30" cy="30" r="26" fill="none" stroke="' + (score >= 80 ? '#10B981' : '#D4AF37') + '" stroke-width="5" stroke-dasharray="' + circ + '" stroke-dashoffset="' + offset + '" stroke-linecap="round"/></svg>' +
+              '<span class="font-mono" style="position:absolute;font-size:13px;font-weight:800;">' + score + '%</span>' +
+            '</div>' +
+            '<span style="font-size:10px;font-weight:700;color:#8E9D96;display:block;margin-top:4px;">' + (score === 100 ? 'Ready' : 'Score') + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+      var segNav = '<div class="seg-tabs">' +
+        '<button class="seg-btn ' + (state.airdropSub==='eligibility'?'active':'') + '" onclick="state.airdropSub=\\'eligibility\\';render()">Eligibility</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='tokenomics'?'active':'') + '" onclick="state.airdropSub=\\'tokenomics\\';render()">Tokenomics</button>' +
+        '<button class="seg-btn ' + (state.airdropSub==='roadmap'?'active':'') + '" onclick="state.airdropSub=\\'roadmap\\';render()">Roadmap</button>' +
+      '</div>';
+
+      var subHtml = '';
+      if (state.airdropSub === 'eligibility') {
+        var checksHtml = '';
+        a.checklist.forEach(function(c) {
+          checksHtml += '<div class="check-row"><span>' + c.label + '</span>' +
+            '<span style="font-weight:700;color:' + (c.done ? '#34D399' : '#8E9D96') + ';">' + (c.done ? '✓ Ready' : 'Pending') + '</span></div>';
+        });
+        subHtml = '<div class="card"><div class="row" style="margin-bottom:6px;"><strong style="font-size:13px;">Airdrop Criteria Checklist (' + a.eligibleCount + '/' + a.totalChecks + ')</strong></div>' + checksHtml + '</div>';
+      } else if (state.airdropSub === 'tokenomics') {
+        subHtml = '<div class="card">' +
+          '<div class="row" style="margin-bottom:10px;"><strong style="font-size:13px;">$HERT Tokenomics</strong><span class="font-mono" style="font-size:11px;color:#E5C158;font-weight:700;">1,000,000,000 $HERT</span></div>' +
+          '<div class="mine-box" style="margin-bottom:8px;border-color:rgba(16,185,129,0.3);background:#0C1914;"><div class="row"><strong style="font-size:12px;color:#34D399;">Community Mining &amp; Airdrop</strong><span class="font-mono" style="font-size:11px;color:#34D399;">65% (650M)</span></div></div>' +
+          '<div class="mine-box" style="margin-bottom:8px;"><div class="row"><strong style="font-size:12px;">Liquidity Pool (STON.fi &amp; DeDust)</strong><span class="font-mono" style="font-size:11px;color:#E5C158;">15% (150M)</span></div></div>' +
+          '<div class="mine-box"><div class="row"><strong style="font-size:12px;">Ecosystem &amp; Core Development</strong><span class="font-mono" style="font-size:11px;color:#8E9D96;">20% (200M)</span></div></div>' +
+        '</div>';
+      } else {
+        subHtml = '<div class="card">' +
+          '<strong style="font-size:13px;display:block;margin-bottom:10px;">HERT Ecosystem Roadmap</strong>' +
+          '<div class="check-row"><div><strong style="color:#10B981;font-size:11px;">PHASE 1 · CURRENT</strong><div>Community Mining &amp; TON Wallet Linking</div></div></div>' +
+          '<div class="check-row"><div><strong style="color:#E5C158;font-size:11px;">PHASE 2 · UPCOMING</strong><div>Airdrop Snapshot &amp; On-Chain $HERT Distribution</div></div></div>' +
+          '<div class="check-row"><div><strong style="color:#8E9D96;font-size:11px;">PHASE 3</strong><div>DEX Listing on STON.fi &amp; DeDust + Staking</div></div></div>' +
+        '</div>';
+      }
+
+      return walletCard + hubBanner + segNav + subHtml;
     }
 
+    // --- Actions ---
     function startMining() {
-      api('/api/mining/start', 'POST').then(function(d) { state.data = d; showToast('Mining started for 4 hours!'); render(); }).catch(function(e){ showToast(e.message); });
+      api('/api/mining/start', 'POST').then(function(d) { state.data = d; showToast('Mining session started (5.00 HERT/h)!'); render(); }).catch(function(e){ showToast(e.message); });
     }
     function harvestMining() {
       api('/api/mining/claim', 'POST').then(function(d) { state.data = d; showToast('Harvested +' + fmt(d.earnedCents) + ' HERT!'); render(); }).catch(function(e){ showToast(e.message); });
@@ -1366,7 +1593,7 @@ const APP_HTML = `<!doctype html>
       }).catch(function(e){ showToast(e.message); });
     }
     function claimTask(id) {
-      api('/api/tasks/' + id + '/claim', 'POST').then(function(d) { state.data = d; showToast('Task reward credited!'); render(); }).catch(function(e){ showToast(e.message); });
+      api('/api/tasks/' + id + '/claim', 'POST').then(function(d) { state.data = d; showToast('Task reward claimed!'); render(); }).catch(function(e){ showToast(e.message); });
     }
     function applyRef() {
       var code = document.getElementById('apply-ref-input').value.trim();
@@ -1418,28 +1645,55 @@ const APP_HTML = `<!doctype html>
         render();
       }).catch(function(e) { showToast(e.message); });
     }
-    function quickWallet(appName) {
-      var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789';
-      var addr = 'UQ';
-      for (var i = 0; i < 44; i++) addr += chars[Math.floor(Math.random() * chars.length)];
-      api('/api/wallet/connect', 'POST', { address: addr, walletAppName: appName }).then(function(d) {
-        state.data = d; closeModal('wallet-modal'); showToast(appName + ' connected!'); render();
-      }).catch(function(e){ showToast(e.message); });
+
+    var tonConnectUI = null;
+    try {
+      if (window.TON_CONNECT_UI && window.TON_CONNECT_UI.TonConnectUI) {
+        tonConnectUI = new window.TON_CONNECT_UI.TonConnectUI({
+          manifestUrl: window.location.origin + '/tonconnect-manifest.json'
+        });
+        tonConnectUI.onStatusChange(function(w) {
+          if (w && w.account && w.account.address) {
+            var appName = (w.device && w.device.appName) ? w.device.appName : 'TON Wallet';
+            api('/api/wallet/connect', 'POST', { address: w.account.address, walletAppName: appName }).then(function(d) {
+              state.data = d; closeModal('wallet-modal'); showToast(appName + ' connected!'); render();
+            }).catch(function(e){ showToast(e.message); });
+          }
+        });
+      }
+    } catch (e) {}
+
+    function openTonConnect(preferredWallet) {
+      if (tonConnectUI) {
+        if (preferredWallet && typeof tonConnectUI.openSingleWalletModal === 'function') {
+          tonConnectUI.openSingleWalletModal(preferredWallet).catch(function() {
+            tonConnectUI.openModal().catch(function() { openModal('wallet-modal'); });
+          });
+        } else {
+          tonConnectUI.openModal().catch(function() { openModal('wallet-modal'); });
+        }
+      } else {
+        openModal('wallet-modal');
+      }
     }
-    function connectManualWallet() {
-      var addr = document.getElementById('wallet-addr-input').value.trim();
+    function connectManualWallet(inputId) {
+      var el = document.getElementById(inputId || 'wallet-addr-input');
+      var addr = el ? el.value.trim() : '';
       api('/api/wallet/connect', 'POST', { address: addr, walletAppName: 'TON Wallet' }).then(function(d) {
-        state.data = d; closeModal('wallet-modal'); showToast('TON Wallet connected!'); render();
+        state.data = d; state.showManualWallet = false; closeModal('wallet-modal'); showToast('TON Wallet connected successfully!'); render();
       }).catch(function(e){ showToast(e.message); });
     }
     function disconnectWallet() {
+      if (tonConnectUI && tonConnectUI.connected) {
+        try { tonConnectUI.disconnect(); } catch (e) {}
+      }
       api('/api/wallet/disconnect', 'POST').then(function(d) {
-        state.data = d; showToast('Wallet disconnected.'); render();
+        state.data = d; showToast('TON Wallet disconnected.'); render();
       }).catch(function(e){ showToast(e.message); });
     }
 
     setInterval(function() {
-      if (state.data && state.data.mining.activeSession && state.tab === 'home') {
+      if (state.data && state.data.mining && state.data.mining.activeSession && state.tab === 'home') {
         var s = state.data.mining.activeSession;
         s.remainingMs = Math.max(0, s.endsAt - Date.now());
         var elapsed = Math.max(0, Date.now() - s.startedAt);
