@@ -1366,7 +1366,14 @@ const APP_HTML = `<!doctype html>
       wheelDeg: 0
     };
     var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+    if (tg) {
+      try {
+        tg.ready();
+        tg.expand();
+        if (tg.setHeaderColor) tg.setHeaderColor('#000000');
+        if (tg.setBackgroundColor) tg.setBackgroundColor('#000000');
+      } catch (e) {}
+    }
 
     function showToast(msg) {
       var el = document.getElementById('toast');
@@ -2022,6 +2029,9 @@ const APP_HTML = `<!doctype html>
 
 app.get('*', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.send(APP_HTML);
 });
 
