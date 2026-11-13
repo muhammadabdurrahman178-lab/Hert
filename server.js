@@ -1072,8 +1072,70 @@ app.get('/api/admin/overview', async (req, res) => {
 });
 
 // Telegram Bot Webhook
-app.post('/api/telegram-webhook', (_req, res) => {
+async function tgBotApi(method, payload) {
+  if (!BOT_TOKEN) return null;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+app.post('/api/telegram-webhook', async (req, res) => {
   res.status(200).json({ ok: true });
+  try {
+    if (dbLoadPromise) await dbLoadPromise.catch(() => {});
+    const update = req.body || {};
+    const msg = update.message;
+    const cb = update.callback_query;
+
+    if (msg && msg.chat && msg.chat.id && BOT_TOKEN) {
+      const chatId = msg.chat.id;
+      const from = msg.from || {};
+      const text = String(msg.text || '').trim();
+      const firstName = from.first_name || from.username || 'Miner';
+      const existing = usersMap.get(String(from.id || chatId)) || usersMap.get('user_' + String(from.id || chatId));
+      const parts = text.split(/\s+/);
+      const startParam = text.startsWith('/start') && parts[1] ? parts[1].trim() : '';
+      const appUrl = `${PUBLIC_WEBAPP_URL}/?v=5${startParam ? '&startapp=' + encodeURIComponent(startParam) : ''}`;
+
+      const balText = existing
+        ? `Your Current Balance: ${(existing.pointsCents / 100).toFixed(2)} HERT\n\n`
+        : '';
+      const refLine = startParam ? `Invite Code Linked: ${startParam}\n` : '';
+
+      await tgBotApi('sendMessage', {
+        chat_id: chatId,
+        text: `HERT Network — Telegram & Web Mining\n\nWelcome, ${firstName}!\n${refLine}${balText}Tap Mine HERT (Open App) below to mine and access your real HERT balance:`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: appUrl } }],
+            [{ text: '🌐 Join Community', url: 'https://t.me/hertchannels' }],
+          ],
+        },
+      });
+    } else if (cb && cb.id && BOT_TOKEN) {
+      await tgBotApi('answerCallbackQuery', { callback_query_id: cb.id });
+      const chatId = cb.message && cb.message.chat ? cb.message.chat.id : cb.from.id;
+      const fromId = String((cb.from && cb.from.id) || chatId);
+      const existing = usersMap.get(fromId) || usersMap.get('user_' + fromId);
+      const bal = existing ? (existing.pointsCents / 100).toFixed(2) : '150.00';
+      await tgBotApi('sendMessage', {
+        chat_id: chatId,
+        text: `Your Real HERT Balance: ${bal} HERT\n\nTap below to open the updated HERT Mining App:`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=5` } }],
+          ],
+        },
+      });
+    }
+  } catch {}
 });
 
 // --- FULL BUILT-IN HERT MINING MINI APP FRONTEND ---
@@ -2067,4 +2129,14 @@ app.get('*', (_req, res) => {
 dbLoadPromise = initAndLoadDb();
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`HERT Mining Server running on http://0.0.0.0:${PORT}`);
+  if (BOT_TOKEN && PUBLIC_WEBAPP_URL.startsWith('https://')) {
+    void tgBotApi('setWebhook', { url: `${PUBLIC_WEBAPP_URL}/api/telegram-webhook` });
+    void tgBotApi('setChatMenuButton', {
+      menu_button: {
+        type: 'web_app',
+        text: 'Mine HERT',
+        web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=5` },
+      },
+    });
+  }
 });
