@@ -3,7 +3,13 @@ import express from 'express';
 import pg from 'pg';
 
 const PORT = Number(process.env.PORT || 3000);
-const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const BOT_TOKEN = (
+  process.env.TELEGRAM_BOT_TOKEN ||
+  process.env.BOT_TOKEN ||
+  process.env.TG_BOT_TOKEN ||
+  process.env.TELEGRAM_TOKEN ||
+  ''
+).replace(/^["']|["']$/g, '').trim();
 const BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || 'HERTCoinBot').replace(/^@/, '').trim();
 const PUBLIC_WEBAPP_URL = (
   process.env.PUBLIC_WEBAPP_URL ||
@@ -645,7 +651,17 @@ function buildPayload(user) {
 // --- API ROUTES ---
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, status: 'ok', time: Date.now() });
+  res.json({
+    ok: true,
+    status: 'ok',
+    time: Date.now(),
+    botConfigured: Boolean(BOT_TOKEN),
+    webappUrl: PUBLIC_WEBAPP_URL,
+    webhookOk: botDiagnostics.setWebhookOk,
+    webhookUrl: botDiagnostics.webhookUrl,
+    webhookError: botDiagnostics.lastError,
+    lastReplyOk: botDiagnostics.lastReplyOk,
+  });
 });
 
 app.get('/tonconnect-manifest.json', (req, res) => {
@@ -976,6 +992,16 @@ app.get('/api/admin/dashboard', async (req, res) => {
       totalTonWalletsConnectedCount,
     },
     snapshots: adminSnapshots,
+    botStatus: {
+      configured: Boolean(BOT_TOKEN),
+      webappUrl: PUBLIC_WEBAPP_URL,
+      webhookOk: botDiagnostics.setWebhookOk,
+      webhookUrl: botDiagnostics.webhookUrl,
+      menuOk: botDiagnostics.setMenuOk,
+      lastError: botDiagnostics.lastError,
+      lastReplyAt: botDiagnostics.lastReplyAt,
+      lastReplyOk: botDiagnostics.lastReplyOk,
+    },
     recentUsers: uniqueUsers
       .sort((a, b) => b.pointsCents - a.pointsCents)
       .map((u) => ({
@@ -991,6 +1017,14 @@ app.get('/api/admin/dashboard', async (req, res) => {
         joinedAt: u.createdAt,
       })),
   });
+});
+
+app.post('/api/admin/sync-bot', async (req, res) => {
+  if (!isAdminAuthorized(req)) {
+    return res.status(401).json({ error: 'Invalid Admin Secret Key.' });
+  }
+  const result = await syncTelegramBot();
+  res.json({ ok: Boolean(result.ok), botStatus: result });
 });
 
 // Admin: Take Live Airdrop & Ledger Snapshot
@@ -1071,23 +1105,79 @@ app.get('/api/admin/overview', async (req, res) => {
   });
 });
 
-// Telegram Bot Webhook
+// Telegram Bot Webhook & Diagnostics
+const botDiagnostics = {
+  setWebhookOk: null,
+  setMenuOk: null,
+  webhookUrl: null,
+  lastError: null,
+  lastReplyAt: null,
+  lastReplyOk: null,
+};
+
 async function tgBotApi(method, payload) {
-  if (!BOT_TOKEN) return null;
+  if (!BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN not configured' };
   try {
     const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload || {}),
     });
     return await r.json();
-  } catch {
-    return null;
+  } catch (err) {
+    return { ok: false, description: err && err.message ? err.message : 'Network error' };
   }
 }
 
+async function syncTelegramBot() {
+  if (!BOT_TOKEN) {
+    botDiagnostics.setWebhookOk = false;
+    botDiagnostics.setMenuOk = false;
+    botDiagnostics.lastError = 'TELEGRAM_BOT_TOKEN is missing in Render Environment Variables';
+    return { ok: false, configured: false, lastError: botDiagnostics.lastError, webappUrl: PUBLIC_WEBAPP_URL };
+  }
+  if (!PUBLIC_WEBAPP_URL.startsWith('https://')) {
+    botDiagnostics.setWebhookOk = false;
+    botDiagnostics.lastError = 'PUBLIC_WEBAPP_URL must start with https://';
+    return { ok: false, configured: true, lastError: botDiagnostics.lastError, webappUrl: PUBLIC_WEBAPP_URL };
+  }
+  const targetWebhook = `${PUBLIC_WEBAPP_URL}/api/telegram-webhook`;
+  const targetAppUrl = `${PUBLIC_WEBAPP_URL}/?v=6`;
+  const [whRes, menuRes, infoRes] = await Promise.all([
+    tgBotApi('setWebhook', {
+      url: targetWebhook,
+      allowed_updates: ['message', 'callback_query'],
+    }),
+    tgBotApi('setChatMenuButton', {
+      menu_button: {
+        type: 'web_app',
+        text: 'Mine HERT',
+        web_app: { url: targetAppUrl },
+      },
+    }),
+    tgBotApi('getWebhookInfo', {}),
+  ]);
+  botDiagnostics.setWebhookOk = Boolean(whRes && whRes.ok);
+  botDiagnostics.setMenuOk = Boolean(menuRes && menuRes.ok);
+  botDiagnostics.webhookUrl = infoRes && infoRes.result ? infoRes.result.url : targetWebhook;
+  botDiagnostics.lastError =
+    (!whRes || !whRes.ok ? (whRes && whRes.description) : null) ||
+    (!menuRes || !menuRes.ok ? (menuRes && menuRes.description) : null) ||
+    (infoRes && infoRes.result && infoRes.result.last_error_message) ||
+    null;
+  console.log('[HERT Bot] Sync:', JSON.stringify(botDiagnostics));
+  return {
+    ok: botDiagnostics.setWebhookOk && botDiagnostics.setMenuOk,
+    configured: true,
+    webappUrl: PUBLIC_WEBAPP_URL,
+    webhookOk: botDiagnostics.setWebhookOk,
+    menuOk: botDiagnostics.setMenuOk,
+    webhookUrl: botDiagnostics.webhookUrl,
+    lastError: botDiagnostics.lastError,
+  };
+}
+
 app.post('/api/telegram-webhook', async (req, res) => {
-  res.status(200).json({ ok: true });
   try {
     if (dbLoadPromise) await dbLoadPromise.catch(() => {});
     const update = req.body || {};
@@ -1102,14 +1192,14 @@ app.post('/api/telegram-webhook', async (req, res) => {
       const existing = usersMap.get(String(from.id || chatId)) || usersMap.get('user_' + String(from.id || chatId));
       const parts = text.split(/\s+/);
       const startParam = text.startsWith('/start') && parts[1] ? parts[1].trim() : '';
-      const appUrl = `${PUBLIC_WEBAPP_URL}/?v=5${startParam ? '&startapp=' + encodeURIComponent(startParam) : ''}`;
+      const appUrl = `${PUBLIC_WEBAPP_URL}/?v=6${startParam ? '&startapp=' + encodeURIComponent(startParam) : ''}`;
 
       const balText = existing
         ? `Your Current Balance: ${(existing.pointsCents / 100).toFixed(2)} HERT\n\n`
         : '';
       const refLine = startParam ? `Invite Code Linked: ${startParam}\n` : '';
 
-      await tgBotApi('sendMessage', {
+      const sendRes = await tgBotApi('sendMessage', {
         chat_id: chatId,
         text: `HERT Network — Telegram & Web Mining\n\nWelcome, ${firstName}!\n${refLine}${balText}Tap Mine HERT (Open App) below to mine and access your real HERT balance:`,
         reply_markup: {
@@ -1119,23 +1209,37 @@ app.post('/api/telegram-webhook', async (req, res) => {
           ],
         },
       });
+      botDiagnostics.lastReplyAt = Date.now();
+      botDiagnostics.lastReplyOk = Boolean(sendRes && sendRes.ok);
+      if (!sendRes || !sendRes.ok) {
+        botDiagnostics.lastError = (sendRes && sendRes.description) || 'sendMessage failed';
+      }
     } else if (cb && cb.id && BOT_TOKEN) {
       await tgBotApi('answerCallbackQuery', { callback_query_id: cb.id });
       const chatId = cb.message && cb.message.chat ? cb.message.chat.id : cb.from.id;
       const fromId = String((cb.from && cb.from.id) || chatId);
       const existing = usersMap.get(fromId) || usersMap.get('user_' + fromId);
       const bal = existing ? (existing.pointsCents / 100).toFixed(2) : '150.00';
-      await tgBotApi('sendMessage', {
+      const sendRes = await tgBotApi('sendMessage', {
         chat_id: chatId,
         text: `Your Real HERT Balance: ${bal} HERT\n\nTap below to open the updated HERT Mining App:`,
         reply_markup: {
           inline_keyboard: [
-            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=5` } }],
+            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=6` } }],
           ],
         },
       });
+      botDiagnostics.lastReplyAt = Date.now();
+      botDiagnostics.lastReplyOk = Boolean(sendRes && sendRes.ok);
+      if (!sendRes || !sendRes.ok) {
+        botDiagnostics.lastError = (sendRes && sendRes.description) || 'callback sendMessage failed';
+      }
     }
-  } catch {}
+  } catch (err) {
+    botDiagnostics.lastReplyOk = false;
+    botDiagnostics.lastError = err && err.message ? err.message : 'webhook exception';
+  }
+  res.status(200).json({ ok: true });
 });
 
 // --- FULL BUILT-IN HERT MINING MINI APP FRONTEND ---
@@ -1850,6 +1954,21 @@ const APP_HTML = `<!doctype html>
         '<div class="card" style="margin-bottom:0;border-radius:18px;"><span class="muted">TON Wallets Connected</span><p class="font-mono" style="margin:6px 0 0;font-size:20px;font-weight:800;color:#60A5FA;">' + ad.stats.totalTonWalletsConnectedCount + '</p></div>' +
       '</div>';
 
+      var bs = ad.botStatus || {};
+      html += '<div class="card" style="margin-top:14px;">' +
+        '<div class="row">' +
+          '<div style="min-width:0;flex:1;padding-right:8px;">' +
+            '<strong style="font-size:13px;display:block;">🤖 Telegram Bot Webhook</strong>' +
+            '<span class="muted" style="font-size:11px;display:block;margin-top:2px;">' +
+              (!bs.configured
+                ? 'TELEGRAM_BOT_TOKEN is NOT set in Render Environment Variables'
+                : (bs.webhookOk ? 'Active: ' + (bs.webhookUrl || bs.webappUrl) : 'Error: ' + (bs.lastError || 'Webhook not synced'))) +
+            '</span>' +
+          '</div>' +
+          '<button class="btn-dark" style="padding:7px 11px;border-color:rgba(16,185,129,0.4);color:#34D399;" onclick="syncAdminBot()">Sync Bot</button>' +
+        '</div>' +
+      '</div>';
+
       html += '<div class="card hero" style="margin-top:14px;">' +
         '<h3 class="font-display" style="margin:0 0 4px;font-size:15px;">📸 Airdrop &amp; Ledger Snapshot Engine</h3>' +
         '<p class="muted" style="margin-bottom:12px;">Capture all user balances, TON wallet addresses, and eligibility.</p>' +
@@ -2043,6 +2162,21 @@ const APP_HTML = `<!doctype html>
       state.adminKey = el ? el.value.trim() : '';
       loadAdminDashboard();
     }
+    function syncAdminBot() {
+      fetch('/api/admin/sync-bot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': state.adminKey || '' }
+      }).then(function(r) {
+        return r.json().then(function(j) {
+          if (!r.ok) throw new Error(j.error || 'Bot sync failed');
+          return j;
+        });
+      }).then(function(res) {
+        if (state.adminData && res.botStatus) state.adminData.botStatus = res.botStatus;
+        showToast(res.ok ? 'Telegram bot webhook synced!' : (res.botStatus && res.botStatus.lastError ? res.botStatus.lastError : 'Bot token missing'));
+        render();
+      }).catch(function(e) { showToast(e.message); });
+    }
     function takeAdminSnapshot() {
       var el = document.getElementById('snap-title-input');
       var title = el ? el.value.trim() : '';
@@ -2129,14 +2263,5 @@ app.get('*', (_req, res) => {
 dbLoadPromise = initAndLoadDb();
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`HERT Mining Server running on http://0.0.0.0:${PORT}`);
-  if (BOT_TOKEN && PUBLIC_WEBAPP_URL.startsWith('https://')) {
-    void tgBotApi('setWebhook', { url: `${PUBLIC_WEBAPP_URL}/api/telegram-webhook` });
-    void tgBotApi('setChatMenuButton', {
-      menu_button: {
-        type: 'web_app',
-        text: 'Mine HERT',
-        web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=5` },
-      },
-    });
-  }
+  void syncTelegramBot();
 });
