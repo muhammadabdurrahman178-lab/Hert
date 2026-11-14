@@ -377,8 +377,9 @@ async function saveUserToDb(user) {
            first_name = COALESCE($8, first_name),
            referral_code = COALESCE(referral_code, $9),
            password_hash = COALESCE($10, password_hash),
-           updated_at = $11
-       WHERE CAST(telegram_id AS TEXT) = $12`,
+           referred_by = COALESCE(referred_by, $11),
+           updated_at = $12
+       WHERE CAST(telegram_id AS TEXT) = $13`,
       [
         user.pointsCents,
         Math.floor(user.pointsCents / 100),
@@ -390,6 +391,7 @@ async function saveUserToDb(user) {
         user.firstName,
         user.referralCode,
         user.passwordHash || null,
+        user.referredBy && /^\d+$/.test(user.referredBy) ? user.referredBy : null,
         Date.now(),
         user.telegramId,
       ]
@@ -468,19 +470,76 @@ function parseTelegramUser(initData) {
   }
 }
 
+function findInviterByCode(rawCode) {
+  const clean = String(rawCode || '').trim().toUpperCase();
+  if (!clean) return null;
+  const noPrefix = clean.replace(/^REF[_-]?/, '').replace(/^HERT[_-]?/, '');
+  const candidates = [
+    'ref:' + clean,
+    clean,
+    'ref:HERT-' + noPrefix,
+    noPrefix,
+    'ref:' + noPrefix,
+  ];
+  for (const key of candidates) {
+    const hit = usersMap.get(key);
+    if (hit && hit.id !== 'sandbox_guest') return hit;
+  }
+  if (noPrefix.length >= 4) {
+    for (const u of new Set(usersMap.values())) {
+      if (u.id === 'sandbox_guest') continue;
+      if (
+        (u.referralCode && u.referralCode.toUpperCase().endsWith(noPrefix)) ||
+        String(u.telegramId).endsWith(noPrefix)
+      ) {
+        return u;
+      }
+    }
+  }
+  return null;
+}
+
+async function creditReferral(user, rawCode, persistUser = true) {
+  if (!user || user.id === 'sandbox_guest' || user.referredBy || !rawCode) return null;
+  const inviter = findInviterByCode(rawCode);
+  if (!inviter || inviter.telegramId === user.telegramId) return null;
+  if (inviter.referredBy === user.telegramId) return null;
+  if (inviter.friends.some((f) => f.telegramId === user.telegramId)) return null;
+
+  user.referredBy = inviter.telegramId;
+  user.pointsCents += REFERRAL_BONUS_CENTS;
+  inviter.pointsCents += REFERRAL_BONUS_CENTS;
+  inviter.totalReferralPointsCents += REFERRAL_BONUS_CENTS;
+  inviter.friends.unshift({
+    telegramId: user.telegramId,
+    username: user.username,
+    firstName: user.firstName,
+    joinedAt: Date.now(),
+  });
+  await saveUserToDb(inviter);
+  if (persistUser) await saveUserToDb(user);
+  return inviter;
+}
+
 async function resolveUserFromReq(req) {
   if (dbLoadPromise) await dbLoadPromise.catch(() => {});
+
+  const hdrStartParam = String(req.headers['x-start-param'] || '').trim() || null;
 
   // 1. Check Telegram Mini App initData FIRST so switching Telegram accounts never leaks a cached Web token
   const initData = req.headers['x-telegram-init-data'] || req.headers['x-telegram-webapp-data'] || '';
   const tg = parseTelegramUser(initData);
   if (tg) {
+    const startCode = tg.startParam || hdrStartParam;
     let user = usersMap.get(tg.telegramId) || usersMap.get('user_' + tg.telegramId);
     if (user) {
       let changed = false;
       if (tg.username && user.username !== tg.username) { user.username = tg.username; changed = true; }
       if (tg.firstName && user.firstName === 'Miner') { user.firstName = tg.firstName; changed = true; }
       if (changed) { indexUser(user); void saveUserToDb(user); }
+      if (startCode && !user.referredBy) {
+        await creditReferral(user, startCode, true);
+      }
       return user;
     }
 
@@ -507,23 +566,8 @@ async function resolveUserFromReq(req) {
       createdAt: Date.now(),
     };
 
-    // Apply start_param invite code if present
-    if (tg.startParam) {
-      const code = tg.startParam.trim().toUpperCase();
-      const inviter = usersMap.get('ref:' + code) || usersMap.get(code);
-      if (inviter && inviter.telegramId !== user.telegramId) {
-        user.referredBy = inviter.telegramId;
-        user.pointsCents += REFERRAL_BONUS_CENTS;
-        inviter.pointsCents += REFERRAL_BONUS_CENTS;
-        inviter.totalReferralPointsCents += REFERRAL_BONUS_CENTS;
-        inviter.friends.unshift({
-          telegramId: user.telegramId,
-          username: user.username,
-          firstName: user.firstName,
-          joinedAt: Date.now(),
-        });
-        void saveUserToDb(inviter);
-      }
+    if (startCode) {
+      await creditReferral(user, startCode, false);
     }
 
     indexUser(user);
@@ -536,7 +580,13 @@ async function resolveUserFromReq(req) {
   if (auth.startsWith('Bearer ')) {
     const tok = auth.slice(7).trim();
     const uid = sessionsMap.get(tok);
-    if (uid && usersMap.has(uid)) return usersMap.get(uid);
+    if (uid && usersMap.has(uid)) {
+      const webUser = usersMap.get(uid);
+      if (hdrStartParam && !webUser.referredBy) {
+        await creditReferral(webUser, hdrStartParam, true);
+      }
+      return webUser;
+    }
   }
 
   return guestUser;
@@ -659,6 +709,8 @@ app.get('/api/health', (_req, res) => {
     webappUrl: PUBLIC_WEBAPP_URL,
     webhookOk: botDiagnostics.setWebhookOk,
     webhookUrl: botDiagnostics.webhookUrl,
+    menuOk: botDiagnostics.setMenuOk,
+    menuUrl: botDiagnostics.menuUrl,
     webhookError: botDiagnostics.lastError,
     lastReplyOk: botDiagnostics.lastReplyOk,
   });
@@ -847,24 +899,12 @@ app.post('/api/referrals/apply', async (req, res) => {
     return res.status(400).json({ error: 'You cannot use your own referral code.' });
   }
 
-  const inviter = usersMap.get('ref:' + code) || usersMap.get(code);
-  if (!inviter) {
+  const inviter = findInviterByCode(code);
+  if (!inviter || inviter.telegramId === user.telegramId) {
     return res.status(404).json({ error: 'Referral code not found.' });
   }
 
-  user.referredBy = inviter.telegramId;
-  user.pointsCents += REFERRAL_BONUS_CENTS;
-  inviter.pointsCents += REFERRAL_BONUS_CENTS;
-  inviter.totalReferralPointsCents += REFERRAL_BONUS_CENTS;
-  inviter.friends.unshift({
-    telegramId: user.telegramId,
-    username: user.username,
-    firstName: user.firstName,
-    joinedAt: Date.now(),
-  });
-
-  await saveUserToDb(user);
-  await saveUserToDb(inviter);
+  await creditReferral(user, code, true);
   res.json({ ...buildPayload(user), message: '+50.00 HERT referral bonus credited!' });
 });
 
@@ -931,6 +971,10 @@ app.post('/api/auth/create-password', async (req, res) => {
       miningSession: null,
       createdAt: Date.now(),
     };
+    const hdrStartParam = String(req.headers['x-start-param'] || '').trim() || null;
+    if (hdrStartParam) {
+      await creditReferral(user, hdrStartParam, false);
+    }
     indexUser(user);
     await insertNewUserToDb(user);
   } else {
@@ -998,6 +1042,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
       webhookOk: botDiagnostics.setWebhookOk,
       webhookUrl: botDiagnostics.webhookUrl,
       menuOk: botDiagnostics.setMenuOk,
+      menuUrl: botDiagnostics.menuUrl,
       lastError: botDiagnostics.lastError,
       lastReplyAt: botDiagnostics.lastReplyAt,
       lastReplyOk: botDiagnostics.lastReplyOk,
@@ -1110,6 +1155,7 @@ const botDiagnostics = {
   setWebhookOk: null,
   setMenuOk: null,
   webhookUrl: null,
+  menuUrl: null,
   lastError: null,
   lastReplyAt: null,
   lastReplyOk: null,
@@ -1142,8 +1188,8 @@ async function syncTelegramBot() {
     return { ok: false, configured: true, lastError: botDiagnostics.lastError, webappUrl: PUBLIC_WEBAPP_URL };
   }
   const targetWebhook = `${PUBLIC_WEBAPP_URL}/api/telegram-webhook`;
-  const targetAppUrl = `${PUBLIC_WEBAPP_URL}/?v=6`;
-  const [whRes, menuRes, infoRes] = await Promise.all([
+  const targetAppUrl = `${PUBLIC_WEBAPP_URL}/?v=7`;
+  const [whRes, menuRes, infoRes, curMenuRes] = await Promise.all([
     tgBotApi('setWebhook', {
       url: targetWebhook,
       allowed_updates: ['message', 'callback_query'],
@@ -1156,10 +1202,14 @@ async function syncTelegramBot() {
       },
     }),
     tgBotApi('getWebhookInfo', {}),
+    tgBotApi('getChatMenuButton', {}),
   ]);
   botDiagnostics.setWebhookOk = Boolean(whRes && whRes.ok);
   botDiagnostics.setMenuOk = Boolean(menuRes && menuRes.ok);
   botDiagnostics.webhookUrl = infoRes && infoRes.result ? infoRes.result.url : targetWebhook;
+  botDiagnostics.menuUrl = curMenuRes && curMenuRes.result && curMenuRes.result.web_app
+    ? curMenuRes.result.web_app.url
+    : targetAppUrl;
   botDiagnostics.lastError =
     (!whRes || !whRes.ok ? (whRes && whRes.description) : null) ||
     (!menuRes || !menuRes.ok ? (menuRes && menuRes.description) : null) ||
@@ -1173,6 +1223,7 @@ async function syncTelegramBot() {
     webhookOk: botDiagnostics.setWebhookOk,
     menuOk: botDiagnostics.setMenuOk,
     webhookUrl: botDiagnostics.webhookUrl,
+    menuUrl: botDiagnostics.menuUrl,
     lastError: botDiagnostics.lastError,
   };
 }
@@ -1188,27 +1239,82 @@ app.post('/api/telegram-webhook', async (req, res) => {
       const chatId = msg.chat.id;
       const from = msg.from || {};
       const text = String(msg.text || '').trim();
+      const fromId = String(from.id || chatId);
       const firstName = from.first_name || from.username || 'Miner';
-      const existing = usersMap.get(String(from.id || chatId)) || usersMap.get('user_' + String(from.id || chatId));
+      let existing = usersMap.get(fromId) || usersMap.get('user_' + fromId);
       const parts = text.split(/\s+/);
-      const startParam = text.startsWith('/start') && parts[1] ? parts[1].trim() : '';
-      const appUrl = `${PUBLIC_WEBAPP_URL}/?v=6${startParam ? '&startapp=' + encodeURIComponent(startParam) : ''}`;
+      const startParam = text.toLowerCase().startsWith('/start') && parts[1] ? parts[1].trim() : '';
+      const appUrl = `${PUBLIC_WEBAPP_URL}/?v=7${startParam ? '&startapp=' + encodeURIComponent(startParam) : ''}`;
+
+      let refCreditedMsg = '';
+      if (startParam && !existing && from.id) {
+        existing = {
+          id: 'user_' + fromId,
+          telegramId: fromId,
+          username: from.username || null,
+          firstName,
+          passwordHash: null,
+          referralCode: 'HERT-' + fromId.slice(-4),
+          referredBy: null,
+          pointsCents: WELCOME_BONUS_CENTS,
+          completedCycles: 0,
+          streakDay: 1,
+          lastCheckIn: 0,
+          lastSpinAt: 0,
+          completedTasks: [],
+          initiatedTasks: {},
+          friends: [],
+          totalReferralPointsCents: 0,
+          wallet: { connected: false, address: null, appName: null },
+          miningSession: null,
+          createdAt: Date.now(),
+        };
+        const inviter = await creditReferral(existing, startParam, false);
+        indexUser(existing);
+        await insertNewUserToDb(existing);
+        if (inviter) {
+          refCreditedMsg = `Invite Bonus: +50.00 HERT credited!\n`;
+          void tgBotApi('sendMessage', {
+            chat_id: inviter.telegramId,
+            text: `🎉 New Referral Joined!\n\n${firstName} joined using your invite link.\n+50.00 HERT & +0.50 HERT/h boost added to your balance!`,
+          });
+        }
+      } else if (startParam && existing && !existing.referredBy) {
+        const inviter = await creditReferral(existing, startParam, true);
+        if (inviter) {
+          refCreditedMsg = `Invite Bonus: +50.00 HERT credited!\n`;
+          void tgBotApi('sendMessage', {
+            chat_id: inviter.telegramId,
+            text: `🎉 New Referral Joined!\n\n${firstName} joined using your invite link.\n+50.00 HERT & +0.50 HERT/h boost added to your balance!`,
+          });
+        }
+      }
 
       const balText = existing
         ? `Your Current Balance: ${(existing.pointsCents / 100).toFixed(2)} HERT\n\n`
         : '';
-      const refLine = startParam ? `Invite Code Linked: ${startParam}\n` : '';
+      const refLine = startParam ? `Invite Code Linked: ${startParam}\n${refCreditedMsg}` : '';
 
-      const sendRes = await tgBotApi('sendMessage', {
-        chat_id: chatId,
-        text: `HERT Network — Telegram & Web Mining\n\nWelcome, ${firstName}!\n${refLine}${balText}Tap Mine HERT (Open App) below to mine and access your real HERT balance:`,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: appUrl } }],
-            [{ text: '🌐 Join Community', url: 'https://t.me/hertchannels' }],
-          ],
-        },
-      });
+      const [sendRes] = await Promise.all([
+        tgBotApi('sendMessage', {
+          chat_id: chatId,
+          text: `HERT Network — Telegram & Web Mining\n\nWelcome, ${firstName}!\n${refLine}${balText}Tap Mine HERT (Open App) below to mine and access your real HERT balance:`,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: appUrl } }],
+              [{ text: '🌐 Join Community', url: 'https://t.me/hertchannels' }],
+            ],
+          },
+        }),
+        tgBotApi('setChatMenuButton', {
+          chat_id: chatId,
+          menu_button: {
+            type: 'web_app',
+            text: 'Mine HERT',
+            web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=7` },
+          },
+        }),
+      ]);
       botDiagnostics.lastReplyAt = Date.now();
       botDiagnostics.lastReplyOk = Boolean(sendRes && sendRes.ok);
       if (!sendRes || !sendRes.ok) {
@@ -1225,7 +1331,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         text: `Your Real HERT Balance: ${bal} HERT\n\nTap below to open the updated HERT Mining App:`,
         reply_markup: {
           inline_keyboard: [
-            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=6` } }],
+            [{ text: '⛏️ Mine HERT (Open App)', web_app: { url: `${PUBLIC_WEBAPP_URL}/?v=7` } }],
           ],
         },
       });
@@ -1586,19 +1692,45 @@ const APP_HTML = `<!doctype html>
     }
 
     function getTgInitData() {
-      if (tg && tg.initData) return tg.initData;
-      try {
-        var hash = window.location.hash || '';
-        if (hash.indexOf('tgWebAppData=') !== -1) {
-          var hp = new URLSearchParams(hash.replace(/^#/, ''));
-          var raw = hp.get('tgWebAppData');
-          if (raw) return raw;
+      var found = '';
+      if (tg && tg.initData) {
+        found = tg.initData;
+      } else {
+        try {
+          var hash = window.location.hash || '';
+          if (hash.indexOf('tgWebAppData=') !== -1) {
+            var hp = new URLSearchParams(hash.replace(/^#/, ''));
+            var raw = hp.get('tgWebAppData');
+            if (raw) found = raw;
+          }
+        } catch (e) {}
+        if (!found && tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+          found = 'user=' + encodeURIComponent(JSON.stringify(tg.initDataUnsafe.user));
         }
-      } catch (e) {}
-      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
-        return 'user=' + encodeURIComponent(JSON.stringify(tg.initDataUnsafe.user));
       }
-      return '';
+      if (found) {
+        try { sessionStorage.setItem('hert_tg_init', found); } catch (e) {}
+        return found;
+      }
+      try {
+        return sessionStorage.getItem('hert_tg_init') || '';
+      } catch (e) {
+        return '';
+      }
+    }
+
+    function getUrlStartParam() {
+      try {
+        var sp = new URLSearchParams(window.location.search || '');
+        var val = sp.get('startapp') || sp.get('ref') || sp.get('start') || '';
+        if (val) {
+          try { sessionStorage.setItem('hert_start_param', val); } catch (e) {}
+          return val;
+        }
+        return sessionStorage.getItem('hert_start_param') || '';
+      } catch (e) {
+        return '';
+      }
     }
 
     function api(path, method, body) {
@@ -1607,6 +1739,8 @@ const APP_HTML = `<!doctype html>
       if (tok) headers['Authorization'] = 'Bearer ' + tok;
       var initD = getTgInitData();
       if (initD) headers['x-telegram-init-data'] = initD;
+      var sp = getUrlStartParam();
+      if (sp) headers['x-start-param'] = sp;
       return fetch(path, {
         method: method || 'GET',
         headers: headers,
